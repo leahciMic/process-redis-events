@@ -1,0 +1,26 @@
+{
+  "name": "process-redis-events",
+  "version": "2.0.3",
+  "description": "",
+  "type": "module",
+  "files": [
+    "dist/"
+  ],
+  "types": "./dist/index.d.ts",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@typescript-eslint/eslint-plugin": "^8.8.0",
+    "eslint": "^9.11.1"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.1",
+    "nanoid": "^5.0.7",
+    "typescript": "^5.6.2"
+  }
+}
