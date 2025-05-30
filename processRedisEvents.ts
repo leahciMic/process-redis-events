@@ -42,6 +42,13 @@ async function createGroup(
   }
 }
 
+function parseJson<T>(value: unknown): T {
+  if (typeof value !== 'string') {
+    throw new Error('Value is not a string')
+  }
+  return JSON.parse(value)
+}
+
 async function getEntries<T>({
   redis,
   stream,
@@ -114,9 +121,15 @@ async function getEntries<T>({
   )
 
   return entries?.[0][1].map(([id, values]) => {
+    const value =
+      values.length === 0
+        ? null
+        : values.length === 2
+        ? parseJson(values[1])
+        : Object.fromEntries(chunk(values, 2))
     const entry: QueueItem<T> = {
       id,
-      value: Object.fromEntries(chunk(values, 2)),
+      value,
       attempts: retryData?.[id] ?? 0,
       ack: async () => {
         await redis.xack(stream, consumerGroup, id)

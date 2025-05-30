@@ -4,8 +4,8 @@ import {
   processRedisStream,
   processRedisStreamOptions
 } from './processRedisEvents.js'
-
-export class Stream<T extends Record<string, string>> {
+type Json = string | number | boolean | null | Json[] | { [key: string]: Json }
+export class Stream<T extends Json> {
   private redis: Redis
   constructor(
     private readonly streamName: string,
@@ -15,8 +15,7 @@ export class Stream<T extends Record<string, string>> {
   }
 
   async add(data: T) {
-    const dataArr = Object.entries(data).flat()
-    await this.redis.xadd(this.streamName, '*', ...dataArr)
+    await this.redis.xadd(this.streamName, '*', 'data', JSON.stringify(data))
   }
 
   process(
