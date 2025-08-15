@@ -1,5 +1,10 @@
 import { Redis, ReplyError } from 'ioredis'
 import { nanoid } from 'nanoid'
+import {
+  RedisStreamTelemetry,
+  getTelemetry,
+  type TelemetryConfig
+} from './telemetry.js'
 
 function chunk<T>(array: T[], size: number): T[][] {
   const chunks: T[][] = []
@@ -56,7 +61,8 @@ async function getEntries<T>({
   consumerId,
   blockFor,
   batchSize,
-  timeout
+  timeout,
+  telemetry
 }: {
   redis: Redis
   consumerId: string
@@ -65,6 +71,7 @@ async function getEntries<T>({
   blockFor: number
   stream: string
   consumerGroup: string
+  telemetry: RedisStreamTelemetry
 }) {
   const claimed = <[string, Array<[string, string[]]>]>(
     await redis.xautoclaim(
@@ -80,6 +87,14 @@ async function getEntries<T>({
   )
 
   const claimedCount = claimed[1].length
+
+  if (claimedCount > 0) {
+    telemetry.recordRetry({
+      streamName: stream,
+      consumerGroup,
+      attemptCount: claimedCount
+    })
+  }
 
   type XPendingData = [string, string, string, string][]
 
@@ -120,7 +135,7 @@ async function getEntries<T>({
     )
   )
 
-  return entries?.[0][1].map(([id, values]) => {
+  const queueItems = entries?.[0][1].map(([id, values]) => {
     const value =
       values.length === 0
         ? null
@@ -140,6 +155,16 @@ async function getEntries<T>({
     }
     return entry
   })
+
+  // Record batch size if we got entries
+  if (queueItems && queueItems.length > 0) {
+    telemetry.recordBatchSize(queueItems.length, {
+      streamName: stream,
+      consumerGroup
+    })
+  }
+
+  return queueItems
 }
 
 type Args<T> = {
@@ -153,24 +178,41 @@ type Args<T> = {
   blockFor?: number
   waitForBatch?: boolean
   shouldRetry?: (attempt: number, entry: T) => boolean
+  telemetry?: RedisStreamTelemetry
 }
 export type processRedisStreamOptions<T> = Omit<Args<T>, 'redis'>
 
 export function processRedisStream<T>(
-  options: Omit<Args<T>, 'redis'>,
+  options: Omit<Args<T>, 'redis'> & {
+    telemetryConfig?: Partial<TelemetryConfig>
+  },
   callback: (entries: QueueItem<T>[]) => Promise<void>,
   threads = 1,
   createRedis = () => new Redis()
 ) {
+  const telemetry = options.telemetry || getTelemetry(options.telemetryConfig)
   const abortController = new AbortController()
+
+  // Record active consumers
+  telemetry.recordActiveConsumers(threads, {
+    streamName: options.stream,
+    consumerGroup: options.consumerGroup
+  })
+
   for (let i = 0; i < threads; i++) {
     runThread(
-      { ...options, redis: createRedis() },
+      { ...options, redis: createRedis(), telemetry },
       abortController.signal,
       callback
     )
   }
   return (closeRedisConnection = true) => {
+    // Reset active consumers to 0
+    telemetry.recordActiveConsumers(0, {
+      streamName: options.stream,
+      consumerGroup: options.consumerGroup
+    })
+
     if (closeRedisConnection) {
       abortController.abort(new AbortErrorAndCloseRedisConnection())
     } else {
@@ -197,8 +239,9 @@ async function runThread<T>(
     timeout = 10_000,
     blockFor = 100,
     startFrom = StartFrom.Latest,
-    waitForBatch = true
-  }: Args<T>,
+    waitForBatch = true,
+    telemetry = getTelemetry()
+  }: Args<T> & { telemetry: RedisStreamTelemetry },
   signal: AbortSignal,
   callback: (entries: QueueItem<T>[]) => Promise<void>
 ) {
@@ -226,7 +269,8 @@ async function runThread<T>(
         consumerId,
         blockFor,
         batchSize,
-        timeout: timeout * 2
+        timeout: timeout * 2,
+        telemetry
       })
 
       if (entries) {
@@ -245,7 +289,53 @@ async function runThread<T>(
     clearTimeout(timeoutId)
 
     if (queuedEntries.length > 0) {
-      await callback(queuedEntries)
+      const timer = telemetry.startTimer()
+
+      try {
+        await callback(queuedEntries)
+
+        const duration = timer()
+
+        // Record successful processing
+        telemetry.recordMessagesProcessed(queuedEntries.length, {
+          streamName: stream,
+          consumerGroup,
+          consumerId,
+          status: 'success'
+        })
+
+        telemetry.recordProcessingDuration(duration, {
+          streamName: stream,
+          consumerGroup,
+          consumerId
+        })
+      } catch (error) {
+        const duration = timer()
+
+        // Record failed processing
+        telemetry.recordMessagesProcessed(queuedEntries.length, {
+          streamName: stream,
+          consumerGroup,
+          consumerId,
+          status: 'error'
+        })
+
+        telemetry.recordProcessingDuration(duration, {
+          streamName: stream,
+          consumerGroup,
+          consumerId
+        })
+
+        telemetry.recordError({
+          streamName: stream,
+          consumerGroup,
+          consumerId,
+          errorType: (error as Error).constructor.name
+        })
+
+        // Re-throw the error to maintain existing behavior
+        throw error
+      }
     }
 
     setTimeout(() => run())
