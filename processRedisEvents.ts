@@ -62,7 +62,8 @@ async function getEntries<T>({
   blockFor,
   batchSize,
   timeout,
-  telemetry
+  telemetry,
+  shouldRetry
 }: {
   redis: Redis
   consumerId: string
@@ -72,6 +73,7 @@ async function getEntries<T>({
   stream: string
   consumerGroup: string
   telemetry: RedisStreamTelemetry
+  shouldRetry?: (attempt: number, entry: T) => boolean
 }) {
   const claimed = <[string, Array<[string, string[]]>]>(
     await redis.xautoclaim(
@@ -135,17 +137,18 @@ async function getEntries<T>({
     )
   )
 
-  const queueItems = entries?.[0][1].map(([id, values]) => {
+  const allItems = entries?.[0][1].map(([id, values]) => {
     const value =
       values.length === 0
         ? null
         : values.length === 2
         ? parseJson(values[1])
         : Object.fromEntries(chunk(values, 2))
+    const attempts = retryData?.[id] ?? 0
     const entry: QueueItem<T> = {
       id,
       value,
-      attempts: retryData?.[id] ?? 0,
+      attempts,
       ack: async () => {
         await redis.xack(stream, consumerGroup, id)
       },
@@ -155,6 +158,65 @@ async function getEntries<T>({
     }
     return entry
   })
+
+  // Filter out items that shouldn't be retried
+  const queueItems = allItems
+    ? await Promise.all(
+        allItems.map(async (item) => {
+          if (
+            shouldRetry &&
+            item.attempts > 0 &&
+            !shouldRetry(item.attempts, item.value)
+          ) {
+            // Message exceeded retry limit - move to dead letter queue
+            const dlqStreamName = `${stream}-dlq`
+
+            try {
+              // Add to dead letter queue with original data plus metadata
+              await redis.xadd(
+                dlqStreamName,
+                '*',
+                'originalId',
+                item.id,
+                'attempts',
+                item.attempts.toString(),
+                'consumerGroup',
+                consumerGroup,
+                'consumerId',
+                consumerId,
+                'timestamp',
+                Date.now().toString(),
+                'data',
+                JSON.stringify(item.value)
+              )
+
+              // Acknowledge original message to remove from stream
+              await item.ack()
+
+              // Record as dead letter
+              telemetry.recordDeadLetter({
+                streamName: stream,
+                consumerGroup,
+                consumerId,
+                reason: 'retry_limit_exceeded'
+              })
+            } catch (error) {
+              // If we can't add to DLQ, log error but still acknowledge to prevent infinite loop
+              console.error(
+                `Failed to add message to dead letter queue ${dlqStreamName}:`,
+                error
+              )
+              await item.ack()
+            }
+
+            return null // Filter out this item
+          }
+          return item
+        })
+      ).then((items) =>
+        items.filter((item): item is QueueItem<T> => item !== null)
+      )
+    : []
 
   // Record batch size if we got entries
   if (queueItems && queueItems.length > 0) {
@@ -240,6 +302,7 @@ async function runThread<T>(
     blockFor = 100,
     startFrom = StartFrom.Latest,
     waitForBatch = true,
+    shouldRetry,
     telemetry = getTelemetry()
   }: Args<T> & { telemetry: RedisStreamTelemetry },
   signal: AbortSignal,
@@ -270,7 +333,8 @@ async function runThread<T>(
         blockFor,
         batchSize,
         timeout: timeout * 2,
-        telemetry
+        telemetry,
+        shouldRetry
       })
 
       if (entries) {

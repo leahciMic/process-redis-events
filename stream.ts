@@ -147,4 +147,93 @@ export class Stream<T extends Json> {
 
     return result
   }
+
+  // Get dead letter queue info
+  async getDeadLetterQueueInfo(): Promise<{
+    length: number
+    lastGeneratedId: string
+  }> {
+    const dlqStreamName = `${this.streamName}-dlq`
+
+    try {
+      const info = (await this.redis.xinfo('STREAM', dlqStreamName)) as any[]
+
+      const result = {
+        length: 0,
+        lastGeneratedId: '0-0'
+      }
+
+      // Parse stream info
+      for (let i = 0; i < info.length; i += 2) {
+        const key = info[i]
+        const value = info[i + 1]
+
+        switch (key) {
+          case 'length':
+            result.length = Number(value)
+            break
+          case 'last-generated-id':
+            result.lastGeneratedId = value as string
+            break
+        }
+      }
+
+      return result
+    } catch (error) {
+      // Dead letter queue doesn't exist yet
+      return {
+        length: 0,
+        lastGeneratedId: '0-0'
+      }
+    }
+  }
+
+  // Read messages from dead letter queue
+  async getDeadLetterMessages(count = 10): Promise<
+    Array<{
+      id: string
+      originalId: string
+      attempts: number
+      consumerGroup: string
+      consumerId: string
+      timestamp: string
+      data: any
+    }>
+  > {
+    const dlqStreamName = `${this.streamName}-dlq`
+
+    try {
+      const messages = await this.redis.xrevrange(
+        dlqStreamName,
+        '+',
+        '-',
+        'COUNT',
+        count
+      )
+
+      return messages.map(([id, fields]: [string, string[]]) => {
+        const fieldMap: Record<string, string> = {}
+        for (let i = 0; i < fields.length - 1; i += 2) {
+          const key = fields[i]
+          const value = fields[i + 1]
+          if (key && value) {
+            fieldMap[key] = value
+          }
+        }
+
+        return {
+          id,
+          originalId: fieldMap['originalId'] || '',
+          attempts: Number(fieldMap['attempts'] || 0),
+          consumerGroup: fieldMap['consumerGroup'] || '',
+          consumerId: fieldMap['consumerId'] || '',
+          timestamp: fieldMap['timestamp'] || '',
+          data: fieldMap['data'] ? JSON.parse(fieldMap['data']) : null
+        }
+      })
+    } catch (error) {
+      // Dead letter queue doesn't exist yet
+      return []
+    }
+  }
 }

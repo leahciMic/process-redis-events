@@ -77,8 +77,7 @@ The library automatically collects:
 - **Active Consumers**: `redis_stream_active_consumers`
 - **Batch Sizes**: `redis_stream_batch_size`
 - **Pending Messages**: `redis_stream_pending_messages`
-
-## Stream Monitoring
+- **Dead Letter Messages**: `redis_stream_dead_letter_messages_total`## Stream Monitoring
 
 ```typescript
 const stream = new Stream('orders')
@@ -89,7 +88,35 @@ console.log(`Stream length: ${info.length}`)
 
 const groupInfo = await stream.getConsumerGroupInfo('processors')
 console.log(`Pending messages: ${groupInfo.pending}`)
+
+// Monitor dead letter queue
+const dlqInfo = await stream.getDeadLetterQueueInfo()
+console.log(`Dead letter queue length: ${dlqInfo.length}`)
+
+// Get failed messages
+const failedMessages = await stream.getDeadLetterMessages(10)
+console.log(`Failed messages:`, failedMessages)
 ```
+
+## Retry Logic & Dead Letter Queue
+
+Configure retry behavior with the `shouldRetry` function:
+
+```typescript
+processRedisStream(
+  {
+    stream: 'orders',
+    consumerGroup: 'processors',
+    shouldRetry: (attempts, message) => {
+      // Retry up to 3 times
+      return attempts < 3
+    }
+  },
+  callback
+)
+```
+
+Messages that exceed the retry limit are automatically moved to a dead letter queue named `${streamName}-dlq` with metadata about the failure.
 
 ## OpenTelemetry SDK Setup
 

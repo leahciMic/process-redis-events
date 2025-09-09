@@ -46,6 +46,7 @@ export class RedisStreamTelemetry {
   private pendingMessagesGauge!: Gauge
   private redisOperationsCounter!: Counter
   private redisOperationDurationHistogram!: Histogram
+  private deadLetterCounter!: Counter
 
   constructor(config: Partial<TelemetryConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config }
@@ -148,6 +149,15 @@ export class RedisStreamTelemetry {
         unit: 's'
       }
     )
+
+    // Counter for dead letter messages
+    this.deadLetterCounter = this.meter.createCounter(
+      'redis_stream_dead_letter_messages_total',
+      {
+        description: 'Total number of messages moved to dead letter queue',
+        unit: '1'
+      }
+    )
   }
 
   private initializeNoOpMetrics() {
@@ -164,6 +174,7 @@ export class RedisStreamTelemetry {
     this.pendingMessagesGauge = noOpGauge
     this.redisOperationsCounter = noOpCounter
     this.redisOperationDurationHistogram = noOpHistogram
+    this.deadLetterCounter = noOpCounter
   }
 
   // Tracing methods
@@ -295,6 +306,20 @@ export class RedisStreamTelemetry {
 
     this.redisOperationsCounter.add(1, attributes)
     this.redisOperationDurationHistogram.record(duration, attributes)
+  }
+
+  recordDeadLetter(labels: {
+    streamName: string
+    consumerGroup: string
+    consumerId: string
+    reason?: string
+  }) {
+    this.deadLetterCounter.add(1, {
+      stream_name: labels.streamName,
+      consumer_group: labels.consumerGroup,
+      consumer_id: labels.consumerId,
+      reason: labels.reason || 'retry_limit_exceeded'
+    })
   }
 
   // Utility methods for measuring time
