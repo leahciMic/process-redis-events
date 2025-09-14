@@ -5,6 +5,7 @@ import {
   getTelemetry,
   type TelemetryConfig
 } from './telemetry.js'
+import z from 'zod'
 
 function chunk<T>(array: T[], size: number): T[][] {
   const chunks: T[][] = []
@@ -78,7 +79,7 @@ async function getEntries<T>(
   },
   signal: AbortSignal
 ) {
-  const claimed = <[string, Array<[string, string[]]>]>(
+  const claimed = <[string, string[], unknown[]]>(
     await redis.xautoclaim(
       stream,
       consumerGroup,
@@ -102,30 +103,39 @@ async function getEntries<T>(
     })
   }
 
-  type XPendingData = [string, string, string, string][]
+  const claimedIds = claimed[1]
 
-  const retryData =
-    claimedCount > 0
-      ? Object.fromEntries(
-          (<XPendingData>(
-            await redis.xpending(
+  const xPendingInfo =
+    claimedIds.length > 0
+      ? await Promise.all(
+          claimedIds.map(async (id) => {
+            const pendingResponse = await redis.xpending(
               stream,
               consumerGroup,
-              'IDLE',
-              timeout,
-              '-',
-              '+',
-              claimedCount,
-              consumerId
+              id,
+              id,
+              1
             )
-          )).map(([id, _consumerId, _idleTime, attempts]) => [
-            id,
-            Number(attempts ?? 0)
-          ])
+            const pending = z
+              .tuple([
+                z.tuple([z.string(), z.string(), z.number(), z.number()])
+              ])
+              .parse(pendingResponse)
+
+            return {
+              id: pending[0][0],
+              consumerId: pending[0][1],
+              idleTime: pending[0][2],
+              attempts: Number(pending[0][3])
+            }
+          })
         )
-      : null
-  console.log('retryData', retryData)
-  console.log('claimed', claimed)
+      : []
+
+  const retryData = Object.fromEntries(
+    xPendingInfo.map(({ id, attempts }) => [id, attempts])
+  )
+
   if (signal.aborted) {
     return []
   }
@@ -338,7 +348,6 @@ async function runThread<T>(
       queuedEntries.length < batchSize &&
       !timeLimitExceeded
     ) {
-      console.log('Fetching entries...', signal.aborted)
       const entries = await getEntries<T>(
         {
           redis,
@@ -415,9 +424,6 @@ async function runThread<T>(
         })
 
         console.error('Error processing entries:', error)
-
-        // Re-throw the error to maintain existing behavior
-        // throw error
       }
     }
 
