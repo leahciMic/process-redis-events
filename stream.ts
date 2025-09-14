@@ -9,6 +9,8 @@ import {
   getTelemetry,
   type TelemetryConfig
 } from './telemetry.js'
+import assert from 'node:assert'
+import pDefer from 'p-defer'
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json }
 export class Stream<T extends Json> {
   private redis: Redis
@@ -27,8 +29,71 @@ export class Stream<T extends Json> {
     await this.redis.del(this.streamName)
   }
 
+  async percent(jobId: string) {
+    const percent = await this.redis.hget(
+      `stream:${this.streamName}:j:${jobId}`,
+      'percent'
+    )
+    return percent ? Number(percent) || 0 : 0
+  }
+
+  async *percentStream(jobId: string) {
+    const sub = this.createRedis()
+    const channel = `stream:${this.streamName}:j:${jobId}:percent`
+
+    let waiting = pDefer()
+    const queue: number[] = []
+
+    sub.on('message', (_chan, message) => {
+      if (_chan === channel) {
+        const percent = Number(message)
+        queue.push(percent)
+        waiting.resolve()
+      }
+    })
+
+    await sub.subscribe(channel)
+    try {
+      while (true) {
+        if (queue.length === 0) {
+          waiting = pDefer()
+          await waiting.promise
+        }
+        while (queue.length > 0) {
+          yield queue.shift()!
+        }
+      }
+    } finally {
+      await sub.unsubscribe(channel)
+      sub.removeAllListeners('message')
+      sub.quit()
+    }
+  }
+
+  async reportPercent(jobId: string, percent: number) {
+    await this.redis.hset(
+      `stream:${this.streamName}:j:${jobId}`,
+      'percent',
+      percent.toString()
+    )
+    this.redis.publish(
+      `stream:${this.streamName}:j:${jobId}:percent`,
+      percent.toString()
+    )
+  }
+
   async add(data: T) {
-    await this.redis.xadd(this.streamName, '*', 'data', JSON.stringify(data))
+    const id = await this.redis.xadd(
+      this.streamName,
+      '*',
+      'data',
+      JSON.stringify(data)
+    )
+    assert(typeof id === 'string', 'Failed to add message to stream')
+    return {
+      id,
+      percent: this.percent.bind(this, id)
+    }
   }
 
   process(
