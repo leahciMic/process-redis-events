@@ -106,11 +106,11 @@ export class Stream<T extends Json> {
       {
         stream: this.streamName,
         telemetry: this.telemetry,
+        createRedis: this.createRedis,
         ...options
       },
       callback,
-      1,
-      this.createRedis
+      1
     )
   }
 
