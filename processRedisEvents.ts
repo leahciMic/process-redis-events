@@ -270,7 +270,7 @@ type Args<T> = {
   shouldRetry?: (attempt: number, entry: T) => boolean
   telemetry?: RedisStreamTelemetry
 }
-export type processRedisStreamOptions<T> = Omit<Args<T>, 'redis'>
+export type processRedisStreamOptions<T> = Omit<Args<T>, 'createRedis'>
 
 export function processRedisStream<T>(
   options: Omit<Args<T>, 'redis'> & {
