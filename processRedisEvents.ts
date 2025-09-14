@@ -58,6 +58,7 @@ function parseJson<T>(value: unknown): T {
 async function getEntries<T>(
   {
     redis,
+    globalRedis,
     stream,
     consumerGroup,
     consumerId,
@@ -68,6 +69,7 @@ async function getEntries<T>(
     shouldRetry
   }: {
     redis: Redis
+    globalRedis: Redis
     consumerId: string
     timeout: number
     batchSize: number
@@ -168,11 +170,18 @@ async function getEntries<T>(
       id,
       value,
       attempts,
+      percent: async (percent: number) => {
+        await globalRedis.hset(
+          `stream:${stream}:j:${id}`,
+          'percent',
+          percent.toString()
+        )
+      },
       ack: async () => {
-        await redis.xack(stream, consumerGroup, id)
+        await globalRedis.xack(stream, consumerGroup, id)
       },
       del: async () => {
-        await redis.xdel(stream, id)
+        await globalRedis.xdel(stream, id)
       }
     }
     return entry
@@ -249,7 +258,7 @@ async function getEntries<T>(
 }
 
 type Args<T> = {
-  redis?: Redis
+  createRedis: () => Redis
   stream: string
   consumerGroup: string
   consumerId?: string
@@ -282,7 +291,7 @@ export function processRedisStream<T>(
 
   for (let i = 0; i < threads; i++) {
     runThread(
-      { ...options, redis: createRedis(), telemetry },
+      { ...options, createRedis, telemetry },
       abortController.signal,
       callback
     )
@@ -308,11 +317,12 @@ export type QueueItem<T> = {
   attempts: number
   ack: () => Promise<void>
   del: () => Promise<void>
+  percent: (percent: number) => Promise<void>
 }
 
 async function runThread<T>(
   {
-    redis = new Redis(),
+    createRedis = () => new Redis(),
     stream,
     consumerGroup,
     consumerId = nanoid(),
@@ -327,6 +337,9 @@ async function runThread<T>(
   signal: AbortSignal,
   callback: (entries: QueueItem<T>[]) => Promise<void>
 ) {
+  const redis = createRedis()
+  const globalRedis = createRedis()
+
   signal.addEventListener('abort', async () => {
     if (signal.reason instanceof AbortErrorAndCloseRedisConnection) {
       // console.log("quit redis");
@@ -351,6 +364,7 @@ async function runThread<T>(
       const entries = await getEntries<T>(
         {
           redis,
+          globalRedis,
           stream,
           consumerGroup,
           consumerId,
