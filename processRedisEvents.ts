@@ -273,12 +273,11 @@ type Args<T> = {
 export type processRedisStreamOptions<T> = Omit<Args<T>, 'createRedis'>
 
 export function processRedisStream<T>(
-  options: Omit<Args<T>, 'redis'> & {
+  options: Args<T> & {
     telemetryConfig?: Partial<TelemetryConfig>
   },
   callback: (entries: QueueItem<T>[]) => Promise<void>,
-  threads = 1,
-  createRedis = () => new Redis()
+  threads = 1
 ) {
   const telemetry = options.telemetry || getTelemetry(options.telemetryConfig)
   const abortController = new AbortController()
@@ -290,11 +289,7 @@ export function processRedisStream<T>(
   })
 
   for (let i = 0; i < threads; i++) {
-    runThread(
-      { ...options, createRedis, telemetry },
-      abortController.signal,
-      callback
-    )
+    runThread({ ...options, telemetry }, abortController.signal, callback)
   }
   return (closeRedisConnection = true) => {
     // Reset active consumers to 0
