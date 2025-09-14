@@ -23,6 +23,10 @@ export class Stream<T extends Json> {
     this.telemetry = getTelemetry(telemetryConfig)
   }
 
+  async clear() {
+    await this.redis.del(this.streamName)
+  }
+
   async add(data: T) {
     await this.redis.xadd(this.streamName, '*', 'data', JSON.stringify(data))
   }

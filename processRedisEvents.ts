@@ -54,27 +54,30 @@ function parseJson<T>(value: unknown): T {
   return JSON.parse(value)
 }
 
-async function getEntries<T>({
-  redis,
-  stream,
-  consumerGroup,
-  consumerId,
-  blockFor,
-  batchSize,
-  timeout,
-  telemetry,
-  shouldRetry
-}: {
-  redis: Redis
-  consumerId: string
-  timeout: number
-  batchSize: number
-  blockFor: number
-  stream: string
-  consumerGroup: string
-  telemetry: RedisStreamTelemetry
-  shouldRetry?: (attempt: number, entry: T) => boolean
-}) {
+async function getEntries<T>(
+  {
+    redis,
+    stream,
+    consumerGroup,
+    consumerId,
+    blockFor,
+    batchSize,
+    timeout,
+    telemetry,
+    shouldRetry
+  }: {
+    redis: Redis
+    consumerId: string
+    timeout: number
+    batchSize: number
+    blockFor: number
+    stream: string
+    consumerGroup: string
+    telemetry: RedisStreamTelemetry
+    shouldRetry?: (attempt: number, entry: T) => boolean
+  },
+  signal: AbortSignal
+) {
   const claimed = <[string, Array<[string, string[]]>]>(
     await redis.xautoclaim(
       stream,
@@ -91,6 +94,7 @@ async function getEntries<T>({
   const claimedCount = claimed[1].length
 
   if (claimedCount > 0) {
+    console.log(`Claimed ${claimedCount} messages for ${consumerId}`)
     telemetry.recordRetry({
       streamName: stream,
       consumerGroup,
@@ -120,6 +124,11 @@ async function getEntries<T>({
           ])
         )
       : null
+  console.log('retryData', retryData)
+  console.log('claimed', claimed)
+  if (signal.aborted) {
+    return []
+  }
 
   type XReadGroup = [[string, [string, string[]][]]]
   const entries = <null | XReadGroup>(
@@ -324,18 +333,26 @@ async function runThread<T>(
       timeLimitExceeded = true
     }, blockFor)
 
-    while (queuedEntries.length < batchSize && !timeLimitExceeded) {
-      const entries = await getEntries<T>({
-        redis,
-        stream,
-        consumerGroup,
-        consumerId,
-        blockFor,
-        batchSize,
-        timeout: timeout * 2,
-        telemetry,
-        shouldRetry
-      })
+    while (
+      !signal.aborted &&
+      queuedEntries.length < batchSize &&
+      !timeLimitExceeded
+    ) {
+      console.log('Fetching entries...', signal.aborted)
+      const entries = await getEntries<T>(
+        {
+          redis,
+          stream,
+          consumerGroup,
+          consumerId,
+          blockFor,
+          batchSize,
+          timeout: timeout * 2,
+          telemetry,
+          shouldRetry
+        },
+        signal
+      )
 
       if (entries) {
         queuedEntries.push(...entries)
@@ -397,8 +414,10 @@ async function runThread<T>(
           errorType: (error as Error).constructor.name
         })
 
+        console.error('Error processing entries:', error)
+
         // Re-throw the error to maintain existing behavior
-        throw error
+        // throw error
       }
     }
 
