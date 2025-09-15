@@ -40,7 +40,8 @@ describe('stream', () => {
         del: expect.any(Function),
         id: expect.any(String),
         attempts: 0,
-        value: { foo: 'bar' }
+        value: { foo: 'bar' },
+        percent: expect.any(Function)
       }
     ])
   })
@@ -60,6 +61,7 @@ describe('stream', () => {
         ack: expect.any(Function),
         del: expect.any(Function),
         id: expect.any(String),
+        percent: expect.any(Function),
         attempts: 1,
         value: { foo: 'baz' }
       }
@@ -80,6 +82,7 @@ describe('stream', () => {
       {
         ack: expect.any(Function),
         del: expect.any(Function),
+        percent: expect.any(Function),
         id: expect.any(String),
         attempts: 4,
         value: { foo: 'baz' }
