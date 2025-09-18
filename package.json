@@ -1,6 +1,6 @@
 {
   "name": "process-redis-events",
-  "version": "2.4.0",
+  "version": "3.0.0",
   "description": "A TypeScript library for processing Redis Stream events with consumer groups.",
   "type": "module",
   "files": [
@@ -24,6 +24,7 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/semantic-conventions": "^1.37.0",
+    "memoize": "^10.1.0",
     "nanoid": "^5.1.5",
     "p-defer": "^4.0.1",
     "vitest": "^3.2.4",
