@@ -6,6 +6,7 @@ import {
   type TelemetryConfig
 } from './telemetry.js'
 import z from 'zod'
+import { resultOf } from './lib/resultOf.js'
 
 function chunk<T>(array: T[], size: number): T[][] {
   const chunks: T[][] = []
@@ -55,32 +56,41 @@ function parseJson<T>(value: unknown): T {
   return JSON.parse(value)
 }
 
-async function getEntries<T>(
-  {
-    redis,
-    globalRedis,
-    stream,
-    consumerGroup,
-    consumerId,
-    blockFor,
-    batchSize,
-    timeout,
-    telemetry,
-    shouldRetry
-  }: {
-    redis: Redis
-    globalRedis: Redis
-    consumerId: string
-    timeout: number
-    batchSize: number
-    blockFor: number
-    stream: string
-    consumerGroup: string
-    telemetry: RedisStreamTelemetry
-    shouldRetry?: (attempt: number, entry: T) => boolean
-  },
+async function getEntries<T>({
+  redis,
+  globalRedis,
+  stream,
+  consumerGroup,
+  consumerId,
+  blockFor,
+  batchSize,
+  timeout,
+  telemetry,
+  shouldRetry,
+  onError,
+  onComplete,
+  onProgress,
+  signal
+}: {
+  redis: Redis
+  globalRedis: Redis
+  consumerId: string
+  timeout: number
+  batchSize: number
+  blockFor: number
+  stream: string
+  consumerGroup: string
+  telemetry: RedisStreamTelemetry
+  onError?: (id: string, error: Error) => Promise<void>
+  onComplete?: (id: string) => Promise<void>
+  onProgress?: (
+    id: string,
+    completionRatio: number,
+    status: string
+  ) => Promise<void>
+  shouldRetry?: (attempt: number, entry: T) => boolean
   signal: AbortSignal
-) {
+}) {
   const claimed = <[string, string[], unknown[]]>(
     await redis.xautoclaim(
       stream,
@@ -94,10 +104,13 @@ async function getEntries<T>(
     )
   )
 
+  if (signal.aborted) {
+    return []
+  }
+
   const claimedCount = claimed[1].length
 
   if (claimedCount > 0) {
-    console.log(`Claimed ${claimedCount} messages for ${consumerId}`)
     telemetry.recordRetry({
       streamName: stream,
       consumerGroup,
@@ -143,20 +156,30 @@ async function getEntries<T>(
   }
 
   type XReadGroup = [[string, [string, string[]][]]]
-  const entries = <null | XReadGroup>(
-    await redis.xreadgroup(
-      'GROUP',
-      consumerGroup,
-      consumerId,
-      'COUNT',
-      claimedCount || batchSize,
-      'BLOCK',
-      blockFor,
-      'STREAMS',
-      stream,
-      claimedCount > 0 ? RedisStreamCursors.Oldest : RedisStreamCursors.Latest
+  const [getEntriesError, entries] = await resultOf(
+    <Promise<null | XReadGroup>>(
+      redis.xreadgroup(
+        'GROUP',
+        consumerGroup,
+        consumerId,
+        'COUNT',
+        claimedCount || batchSize,
+        'BLOCK',
+        blockFor,
+        'STREAMS',
+        stream,
+        claimedCount > 0 ? RedisStreamCursors.Oldest : RedisStreamCursors.Latest
+      )
     )
   )
+
+  if (signal.aborted) {
+    return []
+  }
+
+  if (getEntriesError) {
+    throw getEntriesError
+  }
 
   const allItems = entries?.[0][1].map(([id, values]) => {
     const value =
@@ -170,15 +193,18 @@ async function getEntries<T>(
       id,
       value,
       attempts,
-      percent: async (percent: number) => {
-        await globalRedis.hset(
-          `stream:${stream}:j:${id}`,
-          'percent',
-          percent.toString()
-        )
+      error: (error: Error) => {
+        onError?.(id, error)
+      },
+      reportProgress: async (completionRatio: number, status: string) => {
+        if (completionRatio < 0 || completionRatio > 1) {
+          throw new Error('Percent must be between 0 and 1')
+        }
+        onProgress?.(id, completionRatio, status)
       },
       ack: async () => {
         await globalRedis.xack(stream, consumerGroup, id)
+        await onComplete?.(id)
       },
       del: async () => {
         await globalRedis.xdel(stream, id)
@@ -268,8 +294,17 @@ type Args<T> = {
   blockFor?: number
   waitForBatch?: boolean
   shouldRetry?: (attempt: number, entry: T) => boolean
+  onError?: (id: string, error: Error) => Promise<void>
+  onStart?: (id: string) => Promise<void>
+  onComplete?: (id: string) => Promise<void>
+  onProgress?: (
+    id: string,
+    completionRatio: number,
+    status: string
+  ) => Promise<void>
   telemetry?: RedisStreamTelemetry
 }
+
 export type processRedisStreamOptions<T> = Omit<Args<T>, 'createRedis'>
 
 export function processRedisStream<T>(
@@ -310,9 +345,10 @@ export type QueueItem<T> = {
   id: string
   value: T
   attempts: number
+  error: (error: Error) => void
   ack: () => Promise<void>
   del: () => Promise<void>
-  percent: (percent: number) => Promise<void>
+  reportProgress: (completionRatio: number, status: string) => Promise<void>
 }
 
 async function runThread<T>(
@@ -327,7 +363,11 @@ async function runThread<T>(
     startFrom = StartFrom.Latest,
     waitForBatch = true,
     shouldRetry,
-    telemetry = getTelemetry()
+    telemetry = getTelemetry(),
+    onComplete,
+    onError,
+    onStart,
+    onProgress
   }: Args<T> & { telemetry: RedisStreamTelemetry },
   signal: AbortSignal,
   callback: (entries: QueueItem<T>[]) => Promise<void>
@@ -337,7 +377,6 @@ async function runThread<T>(
 
   signal.addEventListener('abort', async () => {
     if (signal.reason instanceof AbortErrorAndCloseRedisConnection) {
-      // console.log("quit redis");
       await redis.quit()
     }
   })
@@ -356,21 +395,22 @@ async function runThread<T>(
       queuedEntries.length < batchSize &&
       !timeLimitExceeded
     ) {
-      const entries = await getEntries<T>(
-        {
-          redis,
-          globalRedis,
-          stream,
-          consumerGroup,
-          consumerId,
-          blockFor,
-          batchSize,
-          timeout: timeout * 2,
-          telemetry,
-          shouldRetry
-        },
+      const entries = await getEntries<T>({
+        redis,
+        globalRedis,
+        stream,
+        consumerGroup,
+        consumerId,
+        blockFor,
+        batchSize,
+        timeout: timeout * 2,
+        telemetry,
+        shouldRetry,
+        onError,
+        onComplete,
+        onProgress,
         signal
-      )
+      })
 
       if (entries) {
         queuedEntries.push(...entries)
@@ -389,6 +429,10 @@ async function runThread<T>(
 
     if (queuedEntries.length > 0) {
       const timer = telemetry.startTimer()
+
+      queuedEntries.forEach((entry) => {
+        onStart?.(entry.id)
+      })
 
       try {
         await callback(queuedEntries)

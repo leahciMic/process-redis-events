@@ -1,6 +1,8 @@
 import { describe, beforeEach, expect, it, vi, afterEach } from 'vitest'
-import { Stream } from '../stream.js'
+import { Stream, type StreamEvent } from '../stream.js'
 import { StartFrom } from '../processRedisEvents.js'
+import { Redis } from 'ioredis'
+import { nanoid } from 'nanoid'
 
 let stream: Stream<{ foo: string }>
 let mockFn: ReturnType<typeof vi.fn>
@@ -10,8 +12,7 @@ let shouldRetry: ReturnType<typeof vi.fn>
 describe('stream', () => {
   beforeEach(async () => {
     vi.resetAllMocks()
-    stream = new Stream('test-stream')
-    await stream.clear()
+    stream = new Stream(nanoid(), () => new Redis(), true)
     mockFn = vi.fn()
     shouldRetry = vi.fn().mockReturnValue(true)
     stop = stream.process(
@@ -26,8 +27,10 @@ describe('stream', () => {
     )
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     stop(true)
+    await stream.clear()
+    await stream.createEventStream().clear()
   })
 
   it('can process events', async () => {
@@ -39,9 +42,10 @@ describe('stream', () => {
         ack: expect.any(Function),
         del: expect.any(Function),
         id: expect.any(String),
+        error: expect.any(Function),
         attempts: 0,
         value: { foo: 'bar' },
-        percent: expect.any(Function)
+        reportProgress: expect.any(Function)
       }
     ])
   })
@@ -61,7 +65,8 @@ describe('stream', () => {
         ack: expect.any(Function),
         del: expect.any(Function),
         id: expect.any(String),
-        percent: expect.any(Function),
+        reportProgress: expect.any(Function),
+        error: expect.any(Function),
         attempts: 1,
         value: { foo: 'baz' }
       }
@@ -82,11 +87,92 @@ describe('stream', () => {
       {
         ack: expect.any(Function),
         del: expect.any(Function),
-        percent: expect.any(Function),
+        reportProgress: expect.any(Function),
+        error: expect.any(Function),
         id: expect.any(String),
         attempts: 4,
         value: { foo: 'baz' }
       }
+    ])
+  })
+
+  it('emits progress events', async () => {
+    const eventStream = stream.createEventStream()
+
+    mockFn.mockImplementationOnce(async ([event]) => {
+      await event.reportProgress(0.1, 'Starting processing')
+      await event.reportProgress(0.5, 'Halfway there')
+      await event.reportProgress(1, 'Completed')
+      await event.ack()
+    })
+
+    const events: StreamEvent[] = []
+    const stop = eventStream.process(
+      {
+        consumerGroup: 'event-group',
+        startFrom: StartFrom.Oldest,
+        timeout: 200,
+        blockFor: 10
+      },
+      async (entries) => {
+        events.push(...entries.map((e) => e.value))
+        await Promise.all(entries.map((e) => e.ack()))
+      }
+    )
+
+    const { id } = await stream.add({ foo: 'with-progress' })
+    await vi.waitFor(() => expect(mockFn).toHaveBeenCalled())
+    await vi.waitFor(() => expect(events.length).toBe(5), {
+      timeout: 10_000
+    })
+    stop(false)
+
+    expect(events).toEqual([
+      { id, type: 'started' },
+      {
+        id,
+        type: 'progress',
+        completionRatio: 0.1,
+        status: 'Starting processing'
+      },
+      { id, type: 'progress', completionRatio: 0.5, status: 'Halfway there' },
+      { id, type: 'progress', completionRatio: 1, status: 'Completed' },
+      { id, type: 'completed' }
+    ])
+  })
+
+  it('emits failed events', async () => {
+    const eventStream = stream.createEventStream()
+
+    mockFn.mockImplementationOnce(async ([event]) => {
+      await event.error(new Error('Something went wrong'))
+    })
+
+    const events: StreamEvent[] = []
+
+    const stop = eventStream.process(
+      {
+        consumerGroup: 'event-group',
+        startFrom: StartFrom.Oldest,
+        timeout: 200,
+        blockFor: 10
+      },
+      async (entries) => {
+        events.push(...entries.map((e) => e.value))
+        await Promise.all(entries.map((e) => e.ack()))
+      }
+    )
+
+    const { id } = await stream.add({ foo: 'with-error' })
+    await vi.waitFor(() => expect(mockFn).toHaveBeenCalled())
+    await vi.waitFor(() => expect(events.length).toBe(2), {
+      timeout: 10_000
+    })
+    stop(false)
+
+    expect(events).toEqual([
+      { id, type: 'started' },
+      { id, type: 'failed', error: 'Something went wrong' }
     ])
   })
 })

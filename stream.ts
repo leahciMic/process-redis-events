@@ -10,76 +10,62 @@ import {
   type TelemetryConfig
 } from './telemetry.js'
 import assert from 'node:assert'
-import pDefer from 'p-defer'
+import memoize from 'memoize'
+
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json }
+
+type StreamProgressEvent = {
+  type: 'progress'
+  completionRatio: number
+  status: string
+}
+
+type StreamCompletedEvent = {
+  type: 'completed'
+}
+
+type StreamFailedEvent = {
+  type: 'failed'
+  error: string
+}
+
+type StreamStartedEvent = {
+  type: 'started'
+}
+
+export type StreamEvent = { id: string } & (
+  | StreamProgressEvent
+  | StreamCompletedEvent
+  | StreamFailedEvent
+  | StreamStartedEvent
+)
+
 export class Stream<T extends Json> {
   private redis: Redis
   private telemetry: RedisStreamTelemetry
 
   constructor(
     private readonly streamName: string,
-    public readonly createRedis = () => new Redis(),
+    private readonly createRedis = () => new Redis(),
+    private readonly produceEvents = false,
     telemetryConfig?: Partial<TelemetryConfig>
   ) {
     this.redis = this.createRedis()
     this.telemetry = getTelemetry(telemetryConfig)
   }
 
+  createEventStream = memoize(this.createEventStreamImpl.bind(this))
+
+  private createEventStreamImpl() {
+    return new Stream<StreamEvent>(
+      `${this.streamName}:events`,
+      this.createRedis,
+      false
+    )
+  }
+
   async clear() {
     await this.redis.del(this.streamName)
-  }
-
-  async percent(jobId: string) {
-    const percent = await this.redis.hget(
-      `stream:${this.streamName}:j:${jobId}`,
-      'percent'
-    )
-    return percent ? Number(percent) || 0 : 0
-  }
-
-  async *percentStream(jobId: string) {
-    const sub = this.createRedis()
-    const channel = `stream:${this.streamName}:j:${jobId}:percent`
-
-    let waiting = pDefer()
-    const queue: number[] = []
-
-    sub.on('message', (_chan, message) => {
-      if (_chan === channel) {
-        const percent = Number(message)
-        queue.push(percent)
-        waiting.resolve()
-      }
-    })
-
-    await sub.subscribe(channel)
-    try {
-      while (true) {
-        if (queue.length === 0) {
-          waiting = pDefer()
-          await waiting.promise
-        }
-        while (queue.length > 0) {
-          yield queue.shift()!
-        }
-      }
-    } finally {
-      await sub.unsubscribe(channel)
-      sub.removeAllListeners('message')
-      sub.quit()
-    }
-  }
-
-  async reportPercent(jobId: string, percent: number) {
-    await this.redis.hset(
-      `stream:${this.streamName}:j:${jobId}`,
-      'percent',
-      percent.toString()
-    )
-    this.redis.publish(
-      `stream:${this.streamName}:j:${jobId}:percent`,
-      percent.toString()
-    )
   }
 
   async add(data: T) {
@@ -90,10 +76,7 @@ export class Stream<T extends Json> {
       JSON.stringify(data)
     )
     assert(typeof id === 'string', 'Failed to add message to stream')
-    return {
-      id,
-      percent: this.percent.bind(this, id)
-    }
+    return { id }
   }
 
   process(
@@ -107,6 +90,37 @@ export class Stream<T extends Json> {
         stream: this.streamName,
         telemetry: this.telemetry,
         createRedis: this.createRedis,
+        onStart: async (id) => {
+          if (this.produceEvents) {
+            await this.createEventStream().add({ id, type: 'started' })
+          }
+        },
+        onComplete: async (id) => {
+          if (this.produceEvents) {
+            await this.createEventStream().add({ id, type: 'completed' })
+            // Clean up job metadata after completion
+            await this.redis.del(`stream:${this.streamName}:j:${id}`)
+          }
+        },
+        onError: async (id, error) => {
+          if (this.produceEvents) {
+            await this.createEventStream().add({
+              id,
+              type: 'failed',
+              error: error.message
+            })
+          }
+        },
+        onProgress: async (id, completionRatio, status) => {
+          if (this.produceEvents) {
+            await this.createEventStream().add({
+              id,
+              type: 'progress',
+              completionRatio,
+              status
+            })
+          }
+        },
         ...options
       },
       callback,
