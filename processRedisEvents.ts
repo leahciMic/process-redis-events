@@ -40,8 +40,8 @@ async function createGroup(
 ) {
   try {
     await redis.xgroup('CREATE', stream, consumerGroup, startFrom, 'MKSTREAM')
-  } catch (err: typeof ReplyError | any) {
-    if (err instanceof ReplyError && /BUSYGROUP/.test(err.message)) {
+  } catch (err) {
+    if (err instanceof Error && /BUSYGROUP/.test(err.message)) {
       // continue
     } else {
       throw err
