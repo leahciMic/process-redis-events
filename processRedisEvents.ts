@@ -1,4 +1,4 @@
-import { Redis, ReplyError } from 'ioredis'
+import { Redis } from 'ioredis'
 import { nanoid } from 'nanoid'
 import {
   RedisStreamTelemetry,
