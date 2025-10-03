@@ -41,27 +41,34 @@ export type StreamEvent = { id: string } & (
 )
 
 export class Stream<T extends Json> {
-  private redis: Redis
-  private telemetry: RedisStreamTelemetry
+  private readonly redis: Redis
+  private readonly telemetry: RedisStreamTelemetry
 
-  constructor(
-    private readonly streamName: string,
-    private readonly createRedis = () => new Redis(),
-    private readonly produceEvents = false,
+  private readonly streamName: string
+  private readonly createRedis = () => new Redis()
+  private readonly produceEvents: boolean = false
+
+  constructor(options: {
+    streamName: string
+    createRedis: () => Redis
+    produceEvents?: boolean
     telemetryConfig?: Partial<TelemetryConfig>
-  ) {
+  }) {
+    this.streamName = options.streamName
+    this.createRedis = options.createRedis
+    this.produceEvents = options.produceEvents ?? false
     this.redis = this.createRedis()
-    this.telemetry = getTelemetry(telemetryConfig)
+    this.telemetry = getTelemetry(options.telemetryConfig)
   }
 
   createEventStream = memoize(this.createEventStreamImpl.bind(this))
 
   private createEventStreamImpl() {
-    return new Stream<StreamEvent>(
-      `${this.streamName}:events`,
-      this.createRedis,
-      false
-    )
+    return new Stream<StreamEvent>({
+      streamName: `${this.streamName}:events`,
+      createRedis: this.createRedis,
+      produceEvents: false
+    })
   }
 
   async clear() {
