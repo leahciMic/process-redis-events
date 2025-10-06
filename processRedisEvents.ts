@@ -103,12 +103,7 @@ async function runThread<T>(
   await createGroup(redis, stream, consumerGroup, startFrom)
 
   async function run() {
-    const queuedEntries: QueueItem<T>[] = []
-
-    while (
-      !signal.aborted &&
-      queuedEntries.length < batchSize &&
-    ) {
+    while (!signal.aborted) {
       const entries = await getEntries({
         redis,
         stream,
@@ -207,28 +202,22 @@ async function runThread<T>(
         items.filter((item): item is QueueItem<T> => item !== null)
       )
 
-      queuedEntries.push(...queueItems)
-
       if (signal.aborted) {
         return
       }
-
-    }
-
-    if (queuedEntries.length > 0) {
       const timer = telemetry.startTimer()
 
-      queuedEntries.forEach((entry) => {
+      queueItems.forEach((entry) => {
         onStart?.(entry.id)
       })
 
       try {
-        await callback(queuedEntries)
+        await callback(queueItems)
 
         const duration = timer()
 
         // Record successful processing
-        telemetry.recordMessagesProcessed(queuedEntries.length, {
+        telemetry.recordMessagesProcessed(queueItems.length, {
           streamName: stream,
           consumerGroup,
           consumerId,
@@ -244,7 +233,7 @@ async function runThread<T>(
         const duration = timer()
 
         // Record failed processing
-        telemetry.recordMessagesProcessed(queuedEntries.length, {
+        telemetry.recordMessagesProcessed(queueItems.length, {
           streamName: stream,
           consumerGroup,
           consumerId,
