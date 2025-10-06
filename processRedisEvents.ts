@@ -22,7 +22,6 @@ type Args<T> = {
   timeout?: number
   startFrom?: StartFrom
   blockFor?: number
-  waitForBatch?: boolean
   signal: AbortSignal
   shouldRetry?: (attempt: number, entry: T) => boolean
   onError?: (id: string, error: Error) => Promise<void>
@@ -76,7 +75,6 @@ async function runThread<T>(
     timeout = 10_000,
     blockFor = 100,
     startFrom = StartFrom.Latest,
-    waitForBatch = true,
     shouldRetry,
     telemetry = getTelemetry(),
     onComplete,
@@ -106,15 +104,10 @@ async function runThread<T>(
 
   async function run() {
     const queuedEntries: QueueItem<T>[] = []
-    let timeLimitExceeded = false
-    const timeoutId = setTimeout(() => {
-      timeLimitExceeded = true
-    }, blockFor)
 
     while (
       !signal.aborted &&
       queuedEntries.length < batchSize &&
-      !timeLimitExceeded
     ) {
       const entries = await getEntries({
         redis,
@@ -220,12 +213,7 @@ async function runThread<T>(
         return
       }
 
-      if (!waitForBatch) {
-        break
-      }
     }
-
-    clearTimeout(timeoutId)
 
     if (queuedEntries.length > 0) {
       const timer = telemetry.startTimer()
