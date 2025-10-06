@@ -93,26 +93,57 @@ export class Stream<T extends Json, X extends unknown> {
     },
     callback: (entries: QueueItem<T>[]) => Promise<void>
   ) {
-    const redis = this.createRedis()
+    const streamRedis = this.createRedis()
+    const redis = this.redis
+    const streamName = this.name
 
     const heartbeatManager = new HeartbeatManager(
-      this.redis,
-      this.name,
+      redis,
+      streamName,
       consumerGroup,
       consumerId
     )
 
     signal.addEventListener('abort', async () => {
+      await streamRedis.quit()
       await redis.quit()
-      await this.redis.quit()
     })
 
-    await createGroup(redis, this.name, consumerGroup, startFrom)
+    function createQueueItem({
+      id,
+      value,
+      attempts
+    }: {
+      id: string
+      value: T
+      attempts: number
+    }): QueueItem<T> {
+      heartbeatManager.add(id)
+
+      return {
+        id,
+        value,
+        attempts,
+        reportProgress: async (completionRatio: number, status: string) => {
+          if (completionRatio < 0 || completionRatio > 1) {
+            throw new Error('Percent must be between 0 and 1')
+          }
+          onProgress?.(id, completionRatio, status)
+        },
+        ack: async () => {
+          heartbeatManager.remove(id)
+          await redis.xack(streamName, consumerGroup, id)
+          await onComplete?.(id)
+        }
+      }
+    }
+
+    await createGroup(streamRedis, streamName, consumerGroup, startFrom)
 
     while (!signal.aborted) {
       const entries = await getEntries({
-        redis,
-        stream: this.name,
+        redis: streamRedis,
+        stream: streamName,
         consumerGroup,
         consumerId,
         blockFor,
@@ -121,35 +152,7 @@ export class Stream<T extends Json, X extends unknown> {
         signal
       })
 
-      const allItems =
-        entries?.map(({ id, value, attempts }): QueueItem<T> => {
-          heartbeatManager.add(id)
-
-          return {
-            id,
-            value,
-            attempts,
-            error: (error: Error) => {
-              heartbeatManager.remove(id)
-              onError?.(id, error)
-            },
-            reportProgress: async (completionRatio: number, status: string) => {
-              if (completionRatio < 0 || completionRatio > 1) {
-                throw new Error('Percent must be between 0 and 1')
-              }
-              onProgress?.(id, completionRatio, status)
-            },
-            ack: async () => {
-              heartbeatManager.remove(id)
-              await this.redis.xack(this.name, consumerGroup, id)
-              await onComplete?.(id)
-            },
-            del: async () => {
-              heartbeatManager.remove(id)
-              await this.redis.xdel(this.name, id)
-            }
-          }
-        }) ?? []
+      const allItems = entries?.map(createQueueItem) ?? []
 
       const queueItems = await Promise.all(
         allItems.map(async (item) => {
@@ -159,11 +162,11 @@ export class Stream<T extends Json, X extends unknown> {
             !shouldRetry(item.attempts, item.value)
           ) {
             // Message exceeded retry limit - move to dead letter queue
-            const dlqStreamName = `${this.name}-dlq`
+            const dlqStreamName = `${streamName}-dlq`
 
             try {
               // Add to dead letter queue with original data plus metadata
-              await redis.xadd(
+              await streamRedis.xadd(
                 dlqStreamName,
                 '*',
                 'originalId',
@@ -185,7 +188,7 @@ export class Stream<T extends Json, X extends unknown> {
 
               // Record as dead letter
               telemetry.recordDeadLetter({
-                streamName: this.name,
+                streamName: streamName,
                 consumerGroup,
                 consumerId,
                 reason: 'retry_limit_exceeded'
@@ -223,14 +226,14 @@ export class Stream<T extends Json, X extends unknown> {
 
         // Record successful processing
         telemetry.recordMessagesProcessed(queueItems.length, {
-          streamName: this.name,
+          streamName: streamName,
           consumerGroup,
           consumerId,
           status: 'success'
         })
 
         telemetry.recordProcessingDuration(duration, {
-          streamName: this.name,
+          streamName: streamName,
           consumerGroup,
           consumerId
         })
@@ -239,20 +242,20 @@ export class Stream<T extends Json, X extends unknown> {
 
         // Record failed processing
         telemetry.recordMessagesProcessed(queueItems.length, {
-          streamName: this.name,
+          streamName: streamName,
           consumerGroup,
           consumerId,
           status: 'error'
         })
 
         telemetry.recordProcessingDuration(duration, {
-          streamName: this.name,
+          streamName: streamName,
           consumerGroup,
           consumerId
         })
 
         telemetry.recordError({
-          streamName: this.name,
+          streamName: streamName,
           consumerGroup,
           consumerId,
           errorType: (error as Error).constructor.name
