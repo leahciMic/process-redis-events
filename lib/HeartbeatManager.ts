@@ -9,7 +9,7 @@ export class HeartbeatManager {
     private readonly stream: string,
     private readonly consumerGroup: string,
     private readonly consumerId: string,
-    intervalMs = 30_000
+    intervalMs = 15_000
   ) {
     this.intervalId = setInterval(() => {
       this.sendHeartbeats()

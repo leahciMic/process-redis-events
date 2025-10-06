@@ -11,7 +11,14 @@ import { createGroup } from './lib/createGroup.js'
 import { getEntries } from './lib/getEntries.js'
 import pQueue from 'p-queue'
 
-export class Stream<T extends Json, X extends unknown> {
+type Mapped<M> = M extends (a: unknown[]) => readonly (infer R)[] ? R : never
+
+export class Stream<
+  T extends Json,
+  MapFn extends (data: T[]) => Promise<readonly unknown[]> | unknown[] = (
+    data: T[]
+  ) => T[]
+> {
   /** A Redis client instance */
   private readonly redis: Redis
   private readonly telemetry: RedisStreamTelemetry
@@ -23,12 +30,14 @@ export class Stream<T extends Json, X extends unknown> {
   /** Whether to produce event messages for stream processing */
   private readonly produceEvents: boolean = false
   /** Bulk map for efficiently transforming stream data */
-  private readonly map: (data: T[]) => Promise<X[]> | X[]
+  private readonly map: MapFn
+
+  private type!: Mapped<MapFn>
 
   constructor(options: {
     name: string
     createRedis: () => Redis
-    map?: (data: T[]) => X[]
+    map?: MapFn
     produceEvents?: boolean
     telemetryConfig?: TelemetryConfig
   }) {
@@ -42,13 +51,13 @@ export class Stream<T extends Json, X extends unknown> {
       consumerId: 'all',
       ...(options.telemetryConfig ?? {})
     })
-    this.map = options.map ?? ((x) => x as unknown as X[])
+    this.map = (options.map ?? ((xs: T[]) => xs)) as MapFn
   }
 
   createEventStream = memoize(this.createEventStreamImpl.bind(this))
 
   private createEventStreamImpl() {
-    return new Stream<StreamEvent, StreamEvent>({
+    return new Stream<StreamEvent>({
       name: `${this.name}:events`,
       createRedis: this.createRedis,
       produceEvents: false,
@@ -142,11 +151,10 @@ export class Stream<T extends Json, X extends unknown> {
       consumerId?: string
       batchSize?: number
       startFrom?: StartFrom
-      waitForBatch?: boolean
       shouldRetry?: (attempt: number, entry: T) => boolean
       concurrency?: number
     },
-    callback: (queueItem: QueueItem<X>) => Promise<void>
+    callback: (queueItem: QueueItem<Mapped<MapFn>>) => Promise<void>
   ) {
     const streamRedis = this.createRedis()
     const redis = this.redis
@@ -230,14 +238,14 @@ export class Stream<T extends Json, X extends unknown> {
       }
 
       try {
-        const map = await this.map(queueItems.map((x) => x.data))
+        const mapped = await this.map(queueItems.map((x) => x.data))
 
         assert(
-          map.length === queueItems.length,
+          mapped.length === queueItems.length,
           'Map function returned incorrect number of items'
         )
 
-        const mappedQueueItems = map.map((data, index) => ({
+        const mappedQueueItems = mapped.map((data, index) => ({
           ...queueItems[index]!,
           data
         }))
