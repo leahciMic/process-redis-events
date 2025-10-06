@@ -7,5 +7,3 @@ export enum RedisStreamCursors {
   Oldest = '0-0',
   Latest = '>'
 }
-
-export class AbortErrorAndCloseRedisConnection extends Error {}

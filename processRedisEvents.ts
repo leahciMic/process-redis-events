@@ -7,10 +7,7 @@ import {
 } from './telemetry.js'
 import { HeartbeatManager } from './lib/HeartbeatManager.js'
 
-import {
-  StartFrom,
-  AbortErrorAndCloseRedisConnection
-} from './lib/constants.js'
+import { StartFrom } from './lib/constants.js'
 
 import { createGroup } from './lib/createGroup.js'
 import type { QueueItem } from './lib/QueueItem.js'
@@ -26,6 +23,7 @@ type Args<T> = {
   startFrom?: StartFrom
   blockFor?: number
   waitForBatch?: boolean
+  signal: AbortSignal
   shouldRetry?: (attempt: number, entry: T) => boolean
   onError?: (id: string, error: Error) => Promise<void>
   onStart?: (id: string) => Promise<void>
@@ -59,19 +57,13 @@ export function processRedisStream<T>(
   for (let i = 0; i < threads; i++) {
     runThread({ ...options, telemetry }, abortController.signal, callback)
   }
-  return (closeRedisConnection = true) => {
-    // Reset active consumers to 0
+
+  options.signal.addEventListener('abort', () => {
     telemetry.recordActiveConsumers(0, {
       streamName: options.stream,
       consumerGroup: options.consumerGroup
     })
-
-    if (closeRedisConnection) {
-      abortController.abort(new AbortErrorAndCloseRedisConnection())
-    } else {
-      abortController.abort()
-    }
-  }
+  })
 }
 
 async function runThread<T>(
@@ -106,9 +98,8 @@ async function runThread<T>(
   )
 
   signal.addEventListener('abort', async () => {
-    if (signal.reason instanceof AbortErrorAndCloseRedisConnection) {
-      await redis.quit()
-    }
+    await redis.quit()
+    await globalRedis.quit()
   })
 
   await createGroup(redis, stream, consumerGroup, startFrom)
