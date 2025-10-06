@@ -13,7 +13,7 @@ describe('stream', () => {
   beforeEach(async () => {
     vi.resetAllMocks()
     stream = new Stream({
-      streamName: nanoid(),
+      name: nanoid(),
       createRedis: () => new Redis(),
       produceEvents: true
     })

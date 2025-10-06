@@ -26,13 +26,13 @@ export class Stream<T extends Json, X extends unknown> {
   private readonly map: (data: T[]) => Promise<X[]> | X[]
 
   constructor(options: {
-    streamName: string
+    name: string
     createRedis: () => Redis
-    map: (data: T[]) => X[]
+    map?: (data: T[]) => X[]
     produceEvents?: boolean
     telemetryConfig?: TelemetryConfig
   }) {
-    this.name = options.streamName
+    this.name = options.name
     this.createRedis = options.createRedis
     this.produceEvents = options.produceEvents ?? false
     this.redis = this.createRedis()
@@ -42,14 +42,14 @@ export class Stream<T extends Json, X extends unknown> {
       consumerId: 'all',
       ...(options.telemetryConfig ?? {})
     })
-    this.map = options.map
+    this.map = options.map ?? ((x) => x as unknown as X[])
   }
 
   createEventStream = memoize(this.createEventStreamImpl.bind(this))
 
   private createEventStreamImpl() {
     return new Stream<StreamEvent, StreamEvent>({
-      streamName: `${this.name}:events`,
+      name: `${this.name}:events`,
       createRedis: this.createRedis,
       produceEvents: false,
       map: (x) => x
@@ -270,135 +270,6 @@ export class Stream<T extends Json, X extends unknown> {
         )
       } catch (error) {
         console.error('Error processing entries:', error)
-      }
-    }
-  }
-
-  // Utility methods for stream monitoring
-  async getStreamInfo(): Promise<{
-    length: number
-    lastGeneratedId: string
-    groups: number
-  }> {
-    const info = (await this.redis.xinfo('STREAM', this.name)) as any[]
-
-    const result = {
-      length: 0,
-      lastGeneratedId: '0-0',
-      groups: 0
-    }
-
-    // Redis returns info as an array of key-value pairs
-    for (let i = 0; i < info.length; i += 2) {
-      const key = info[i]
-      const value = info[i + 1]
-
-      switch (key) {
-        case 'length':
-          result.length = Number(value)
-          break
-        case 'last-generated-id':
-          result.lastGeneratedId = value as string
-          break
-        case 'groups':
-          result.groups = Number(value)
-          break
-      }
-    }
-
-    // Record stream length as pending messages metric
-    this.telemetry.recordPendingMessages(result.length)
-
-    return result
-  }
-
-  async getConsumerGroupInfo(consumerGroup: string): Promise<{
-    pending: number
-    consumers: number
-    lastDeliveredId: string
-  }> {
-    const groups = (await this.redis.xinfo('GROUPS', this.name)) as any[][]
-
-    // Find the specific consumer group
-    const groupInfo = groups.find((group: any[]) => {
-      for (let i = 0; i < group.length; i += 2) {
-        if (group[i] === 'name' && group[i + 1] === consumerGroup) {
-          return true
-        }
-      }
-      return false
-    })
-
-    if (!groupInfo) {
-      throw new Error(`Consumer group '${consumerGroup}' not found`)
-    }
-
-    const result = {
-      pending: 0,
-      consumers: 0,
-      lastDeliveredId: '0-0'
-    }
-
-    // Parse group info
-    for (let i = 0; i < groupInfo.length; i += 2) {
-      const key = groupInfo[i]
-      const value = groupInfo[i + 1]
-
-      switch (key) {
-        case 'pending':
-          result.pending = Number(value)
-          break
-        case 'consumers':
-          result.consumers = Number(value)
-          break
-        case 'last-delivered-id':
-          result.lastDeliveredId = value as string
-          break
-      }
-    }
-
-    // Record pending messages for this consumer group
-    this.telemetry.recordPendingMessages(result.pending)
-
-    return result
-  }
-
-  // Get dead letter queue info
-  async getDeadLetterQueueInfo(): Promise<{
-    length: number
-    lastGeneratedId: string
-  }> {
-    const dlqStreamName = `${this.name}-dlq`
-
-    try {
-      const info = (await this.redis.xinfo('STREAM', dlqStreamName)) as any[]
-
-      const result = {
-        length: 0,
-        lastGeneratedId: '0-0'
-      }
-
-      // Parse stream info
-      for (let i = 0; i < info.length; i += 2) {
-        const key = info[i]
-        const value = info[i + 1]
-
-        switch (key) {
-          case 'length':
-            result.length = Number(value)
-            break
-          case 'last-generated-id':
-            result.lastGeneratedId = value as string
-            break
-        }
-      }
-
-      return result
-    } catch (error) {
-      // Dead letter queue doesn't exist yet
-      return {
-        length: 0,
-        lastGeneratedId: '0-0'
       }
     }
   }
