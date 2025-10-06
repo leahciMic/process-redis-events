@@ -1,6 +1,5 @@
 import { Redis } from 'ioredis'
 import {
-  QueueItem,
   processRedisStream,
   processRedisStreamOptions
 } from './processRedisEvents.js'
@@ -11,6 +10,7 @@ import {
 } from './telemetry.js'
 import assert from 'node:assert'
 import memoize from 'memoize'
+import type { QueueItem } from './lib/QueueItem.js'
 
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json }
 
@@ -90,7 +90,8 @@ export class Stream<T extends Json> {
     options: Omit<processRedisStreamOptions<T>, 'stream'> & {
       telemetryConfig?: Partial<TelemetryConfig>
     },
-    callback: (entries: QueueItem<T>[]) => Promise<void>
+    callback: (entries: QueueItem<T>[]) => Promise<void>,
+    concurrency = 1
   ) {
     return processRedisStream(
       {
@@ -131,7 +132,7 @@ export class Stream<T extends Json> {
         ...options
       },
       callback,
-      1
+      concurrency
     )
   }
 

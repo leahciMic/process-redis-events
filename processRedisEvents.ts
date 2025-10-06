@@ -125,9 +125,8 @@ async function runThread<T>(
       queuedEntries.length < batchSize &&
       !timeLimitExceeded
     ) {
-      const entries = await getEntries<T>({
+      const entries = await getEntries({
         redis,
-        globalRedis,
         stream,
         consumerGroup,
         consumerId,
@@ -135,17 +134,96 @@ async function runThread<T>(
         batchSize,
         timeout: timeout * 2,
         telemetry,
-        shouldRetry,
-        onError,
-        onComplete,
-        onProgress,
-        signal,
-        heartbeatManager
+        signal
       })
 
-      if (entries) {
-        queuedEntries.push(...entries)
-      }
+      const allItems =
+        entries?.map(({ id, value, attempts }): QueueItem<T> => {
+          heartbeatManager.add(id)
+
+          return {
+            id,
+            value,
+            attempts,
+            error: (error: Error) => {
+              heartbeatManager.remove(id)
+              onError?.(id, error)
+            },
+            reportProgress: async (completionRatio: number, status: string) => {
+              if (completionRatio < 0 || completionRatio > 1) {
+                throw new Error('Percent must be between 0 and 1')
+              }
+              onProgress?.(id, completionRatio, status)
+            },
+            ack: async () => {
+              heartbeatManager.remove(id)
+              await globalRedis.xack(stream, consumerGroup, id)
+              await onComplete?.(id)
+            },
+            del: async () => {
+              heartbeatManager.remove(id)
+              await globalRedis.xdel(stream, id)
+            }
+          }
+        }) ?? []
+
+      const queueItems = await Promise.all(
+        allItems.map(async (item) => {
+          if (
+            shouldRetry &&
+            item.attempts > 0 &&
+            !shouldRetry(item.attempts, item.value)
+          ) {
+            // Message exceeded retry limit - move to dead letter queue
+            const dlqStreamName = `${stream}-dlq`
+
+            try {
+              // Add to dead letter queue with original data plus metadata
+              await redis.xadd(
+                dlqStreamName,
+                '*',
+                'originalId',
+                item.id,
+                'attempts',
+                item.attempts.toString(),
+                'consumerGroup',
+                consumerGroup,
+                'consumerId',
+                consumerId,
+                'timestamp',
+                Date.now().toString(),
+                'data',
+                JSON.stringify(item.value)
+              )
+
+              // Acknowledge original message to remove from stream
+              await item.ack()
+
+              // Record as dead letter
+              telemetry.recordDeadLetter({
+                streamName: stream,
+                consumerGroup,
+                consumerId,
+                reason: 'retry_limit_exceeded'
+              })
+            } catch (error) {
+              // If we can't add to DLQ, log error but still acknowledge to prevent infinite loop
+              console.error(
+                `Failed to add message to dead letter queue ${dlqStreamName}:`,
+                error
+              )
+              await item.ack()
+            }
+
+            return null // Filter out this item
+          }
+          return item
+        })
+      ).then((items) =>
+        items.filter((item): item is QueueItem<T> => item !== null)
+      )
+
+      queuedEntries.push(...queueItems)
 
       if (signal.aborted) {
         return
@@ -208,6 +286,10 @@ async function runThread<T>(
         })
 
         console.error('Error processing entries:', error)
+      } finally {
+        for (const entry of queuedEntries) {
+          heartbeatManager.remove(entry.id)
+        }
       }
     }
 
