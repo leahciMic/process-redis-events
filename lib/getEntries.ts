@@ -1,5 +1,4 @@
 import type { Redis } from 'ioredis'
-import type { RedisStreamTelemetry } from '../telemetry.js'
 import { RedisStreamCursors } from './constants.js'
 import { resultOf } from './resultOf.js'
 import { chunk } from './chunk.js'
@@ -14,7 +13,6 @@ export async function getEntries({
   blockFor,
   batchSize,
   timeout,
-  telemetry,
   signal
 }: {
   redis: Redis
@@ -24,7 +22,6 @@ export async function getEntries({
   blockFor: number
   stream: string
   consumerGroup: string
-  telemetry: RedisStreamTelemetry
   signal: AbortSignal
 }) {
   const claimed = <[string, string[], unknown[]]>(
@@ -123,16 +120,6 @@ export async function getEntries({
       attempts
     }
   })
-
-  // Filter out items that shouldn't be retried
-
-  // Record batch size if we got entries
-  if (queueItems && queueItems.length > 0) {
-    telemetry.recordBatchSize(queueItems.length, {
-      streamName: stream,
-      consumerGroup
-    })
-  }
 
   return queueItems
 }
