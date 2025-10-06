@@ -1,13 +1,5 @@
 import { Redis } from 'ioredis'
-import {
-  processRedisStream,
-  processRedisStreamOptions
-} from './processRedisEvents.js'
-import {
-  RedisStreamTelemetry,
-  getTelemetry,
-  type TelemetryConfig
-} from './telemetry.js'
+import { RedisStreamTelemetry, type TelemetryConfig } from './telemetry.js'
 import assert from 'node:assert'
 import memoize from 'memoize'
 import type { QueueItem } from './lib/QueueItem.js'
@@ -17,6 +9,7 @@ import { HeartbeatManager } from './lib/HeartbeatManager.js'
 import { nanoid } from 'nanoid'
 import { createGroup } from './lib/createGroup.js'
 import { getEntries } from './lib/getEntries.js'
+import pQueue from 'p-queue'
 
 export class Stream<T extends Json, X extends unknown> {
   /** A Redis client instance */
@@ -30,20 +23,25 @@ export class Stream<T extends Json, X extends unknown> {
   /** Whether to produce event messages for stream processing */
   private readonly produceEvents: boolean = false
   /** Bulk map for efficiently transforming stream data */
-  private readonly map: (data: T) => X
+  private readonly map: (data: T[]) => Promise<X[]> | X[]
 
   constructor(options: {
     streamName: string
     createRedis: () => Redis
-    map: (data: T) => X
+    map: (data: T[]) => X[]
     produceEvents?: boolean
-    telemetryConfig?: Partial<TelemetryConfig>
+    telemetryConfig?: TelemetryConfig
   }) {
     this.name = options.streamName
     this.createRedis = options.createRedis
     this.produceEvents = options.produceEvents ?? false
     this.redis = this.createRedis()
-    this.telemetry = getTelemetry(options.telemetryConfig)
+    this.telemetry = new RedisStreamTelemetry({
+      streamName: this.name,
+      consumerGroup: 'all',
+      consumerId: 'all',
+      ...(options.telemetryConfig ?? {})
+    })
     this.map = options.map
   }
 
@@ -73,6 +71,60 @@ export class Stream<T extends Json, X extends unknown> {
     return { id }
   }
 
+  private async checkRetry(
+    items: QueueItem<T>[],
+    shouldRetry: (attempts: number, data: T) => boolean | undefined,
+    streamName: string,
+    consumerGroup: string,
+    consumerId: string
+  ): Promise<QueueItem<T>[]> {
+    return await Promise.all(
+      items.map(async (item) => {
+        if (
+          shouldRetry &&
+          item.attempts > 0 &&
+          !shouldRetry(item.attempts, item.data)
+        ) {
+          // Message exceeded retry limit - move to dead letter queue
+          const dlqStreamName = `${streamName}-dlq`
+
+          try {
+            // Add to dead letter queue with original data plus metadata
+            await this.redis.xadd(
+              dlqStreamName,
+              '*',
+              'originalId',
+              item.id,
+              'attempts',
+              item.attempts.toString(),
+              'consumerGroup',
+              consumerGroup,
+              'consumerId',
+              consumerId,
+              'timestamp',
+              Date.now().toString(),
+              'data',
+              JSON.stringify(item.data)
+            )
+          } catch (error) {
+            // If we can't add to DLQ, log error but still acknowledge to prevent infinite loop
+            console.error(
+              `Failed to add message to dead letter queue ${dlqStreamName}:`,
+              error
+            )
+          } finally {
+            await this.redis.xack(streamName, consumerGroup, item.id)
+          }
+
+          return null // Filter out this item
+        }
+        return item
+      })
+    ).then((items) =>
+      items.filter((item): item is QueueItem<T> => item !== null)
+    )
+  }
+
   async process(
     {
       consumerGroup,
@@ -81,21 +133,34 @@ export class Stream<T extends Json, X extends unknown> {
       timeout = 10_000,
       blockFor = 100,
       startFrom = StartFrom.Latest,
-      shouldRetry,
-      onComplete,
-      onError,
-      onStart,
-      onProgress,
-      telemetry,
-      signal
-    }: Omit<processRedisStreamOptions<T>, 'stream'> & {
-      telemetryConfig?: Partial<TelemetryConfig>
+      shouldRetry = () => true,
+      signal,
+      concurrency = 10
+    }: {
+      createRedis: () => Redis
+      signal: AbortSignal
+      stream: string
+      consumerGroup: string
+      consumerId?: string
+      batchSize?: number
+      timeout?: number
+      startFrom?: StartFrom
+      blockFor?: number
+      waitForBatch?: boolean
+      shouldRetry?: (attempt: number, entry: T) => boolean
+      concurrency?: number
     },
-    callback: (entries: QueueItem<T>[]) => Promise<void>
+    callback: (queueItem: QueueItem<X>) => Promise<void>
   ) {
     const streamRedis = this.createRedis()
     const redis = this.redis
     const streamName = this.name
+    const queue = new pQueue({ concurrency })
+
+    const telemetry = this.telemetry.child({
+      consumerGroup,
+      consumerId
+    })
 
     const heartbeatManager = new HeartbeatManager(
       redis,
@@ -104,6 +169,8 @@ export class Stream<T extends Json, X extends unknown> {
       consumerId
     )
 
+    const eventStream = this.produceEvents ? this.createEventStream() : null
+
     signal.addEventListener('abort', async () => {
       await streamRedis.quit()
       await redis.quit()
@@ -111,29 +178,29 @@ export class Stream<T extends Json, X extends unknown> {
 
     function createQueueItem({
       id,
-      value,
+      data,
       attempts
     }: {
       id: string
-      value: T
+      data: T
       attempts: number
     }): QueueItem<T> {
       heartbeatManager.add(id)
 
       return {
         id,
-        value,
+        data,
         attempts,
         reportProgress: async (completionRatio: number, status: string) => {
           if (completionRatio < 0 || completionRatio > 1) {
             throw new Error('Percent must be between 0 and 1')
           }
-          onProgress?.(id, completionRatio, status)
-        },
-        ack: async () => {
-          heartbeatManager.remove(id)
-          await redis.xack(streamName, consumerGroup, id)
-          await onComplete?.(id)
+          await eventStream?.add({
+            id,
+            completionRatio,
+            status,
+            type: 'progress'
+          })
         }
       }
     }
@@ -141,6 +208,8 @@ export class Stream<T extends Json, X extends unknown> {
     await createGroup(streamRedis, streamName, consumerGroup, startFrom)
 
     while (!signal.aborted) {
+      await queue.onSizeLessThan(concurrency)
+
       const entries = await getEntries({
         redis: streamRedis,
         stream: streamName,
@@ -152,120 +221,57 @@ export class Stream<T extends Json, X extends unknown> {
         signal
       })
 
-      const allItems = entries?.map(createQueueItem) ?? []
-
-      const queueItems = await Promise.all(
-        allItems.map(async (item) => {
-          if (
-            shouldRetry &&
-            item.attempts > 0 &&
-            !shouldRetry(item.attempts, item.value)
-          ) {
-            // Message exceeded retry limit - move to dead letter queue
-            const dlqStreamName = `${streamName}-dlq`
-
-            try {
-              // Add to dead letter queue with original data plus metadata
-              await streamRedis.xadd(
-                dlqStreamName,
-                '*',
-                'originalId',
-                item.id,
-                'attempts',
-                item.attempts.toString(),
-                'consumerGroup',
-                consumerGroup,
-                'consumerId',
-                consumerId,
-                'timestamp',
-                Date.now().toString(),
-                'data',
-                JSON.stringify(item.value)
-              )
-
-              // Acknowledge original message to remove from stream
-              await item.ack()
-
-              // Record as dead letter
-              telemetry.recordDeadLetter({
-                streamName: streamName,
-                consumerGroup,
-                consumerId,
-                reason: 'retry_limit_exceeded'
-              })
-            } catch (error) {
-              // If we can't add to DLQ, log error but still acknowledge to prevent infinite loop
-              console.error(
-                `Failed to add message to dead letter queue ${dlqStreamName}:`,
-                error
-              )
-              await item.ack()
-            }
-
-            return null // Filter out this item
-          }
-          return item
-        })
-      ).then((items) =>
-        items.filter((item): item is QueueItem<T> => item !== null)
+      const queueItems = await this.checkRetry(
+        entries?.map(createQueueItem) ?? [],
+        shouldRetry,
+        streamName,
+        consumerGroup,
+        consumerId
       )
 
       if (signal.aborted) {
         return
       }
-      const timer = telemetry.startTimer()
-
-      queueItems.forEach((entry) => {
-        onStart?.(entry.id)
-      })
 
       try {
-        await callback(queueItems)
+        const map = await this.map(queueItems.map((x) => x.data))
 
-        const duration = timer()
+        assert(
+          map.length === queueItems.length,
+          'Map function returned incorrect number of items'
+        )
 
-        // Record successful processing
-        telemetry.recordMessagesProcessed(queueItems.length, {
-          streamName: streamName,
-          consumerGroup,
-          consumerId,
-          status: 'success'
-        })
+        const mappedQueueItems = map.map((data, index) => ({
+          ...queueItems[index]!,
+          data
+        }))
 
-        telemetry.recordProcessingDuration(duration, {
-          streamName: streamName,
-          consumerGroup,
-          consumerId
-        })
+        telemetry.recordBatchSize(mappedQueueItems.length)
+
+        queue.addAll(
+          mappedQueueItems.map((item) => async () => {
+            const timer = telemetry.startTimer()
+            try {
+              await eventStream?.add({ id: item.id, type: 'started' })
+              await callback(item)
+              telemetry.recordMessagesProcessed(1, { status: 'success' })
+              const duration = timer()
+              telemetry.recordProcessingDuration(duration)
+              await redis.xack(streamName, consumerGroup, item.id)
+              await eventStream?.add({ id: item.id, type: 'completed' })
+            } catch (e) {
+              await eventStream?.add({
+                id: item.id,
+                type: 'failed',
+                error: (e as Error).message
+              })
+              telemetry.recordMessagesProcessed(1, { status: 'error' })
+            }
+          }),
+          { signal }
+        )
       } catch (error) {
-        const duration = timer()
-
-        // Record failed processing
-        telemetry.recordMessagesProcessed(queueItems.length, {
-          streamName: streamName,
-          consumerGroup,
-          consumerId,
-          status: 'error'
-        })
-
-        telemetry.recordProcessingDuration(duration, {
-          streamName: streamName,
-          consumerGroup,
-          consumerId
-        })
-
-        telemetry.recordError({
-          streamName: streamName,
-          consumerGroup,
-          consumerId,
-          errorType: (error as Error).constructor.name
-        })
-
         console.error('Error processing entries:', error)
-      } finally {
-        for (const entry of queueItems) {
-          heartbeatManager.remove(entry.id)
-        }
       }
     }
   }
@@ -303,10 +309,7 @@ export class Stream<T extends Json, X extends unknown> {
     }
 
     // Record stream length as pending messages metric
-    this.telemetry.recordPendingMessages(result.length, {
-      streamName: this.name,
-      consumerGroup: 'all' // Special label for overall stream length
-    })
+    this.telemetry.recordPendingMessages(result.length)
 
     return result
   }
@@ -357,10 +360,7 @@ export class Stream<T extends Json, X extends unknown> {
     }
 
     // Record pending messages for this consumer group
-    this.telemetry.recordPendingMessages(result.pending, {
-      streamName: this.name,
-      consumerGroup
-    })
+    this.telemetry.recordPendingMessages(result.pending)
 
     return result
   }

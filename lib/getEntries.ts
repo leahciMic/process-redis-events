@@ -106,7 +106,7 @@ export async function getEntries({
   }
 
   const queueItems = entries?.[0][1].map(([id, values]) => {
-    const value =
+    const data =
       values.length === 0
         ? null
         : values.length === 2
@@ -116,7 +116,7 @@ export async function getEntries({
 
     return {
       id,
-      value,
+      data,
       attempts
     }
   })

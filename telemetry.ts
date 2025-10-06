@@ -12,23 +12,23 @@ import {
   Tracer
 } from '@opentelemetry/api'
 
-// Telemetry configuration
 export interface TelemetryConfig {
-  enabled: boolean
-  metricsEnabled: boolean
-  tracingEnabled: boolean
+  enabled?: boolean
+
+  version?: string
   meterName?: string
   tracerName?: string
-  version?: string
+
+  streamName: string
+  consumerGroup: string
+  consumerId: string
 }
 
-const DEFAULT_CONFIG: TelemetryConfig = {
+const defaults = {
   enabled: true,
-  metricsEnabled: true,
-  tracingEnabled: true,
   meterName: 'process-redis-events',
   tracerName: 'process-redis-events',
-  version: '2.0.6'
+  version: '5.0.0'
 }
 
 export class RedisStreamTelemetry {
@@ -36,20 +36,13 @@ export class RedisStreamTelemetry {
   private meter: Meter
   private tracer: Tracer
 
-  // Metrics
   private messagesProcessedCounter!: Counter
   private processingDurationHistogram!: Histogram
-  private errorCounter!: Counter
-  private retryCounter!: Counter
-  private activeConsumersGauge!: Gauge
   private batchSizeHistogram!: Histogram
   private pendingMessagesGauge!: Gauge
-  private redisOperationsCounter!: Counter
-  private redisOperationDurationHistogram!: Histogram
-  private deadLetterCounter!: Counter
 
-  constructor(config: Partial<TelemetryConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config }
+  constructor(config: TelemetryConfig) {
+    this.config = { ...defaults, ...config }
 
     if (!this.config.enabled) {
       // Create no-op implementations when disabled
@@ -60,18 +53,16 @@ export class RedisStreamTelemetry {
     }
 
     this.meter = metrics.getMeter(this.config.meterName!, this.config.version)
-
     this.tracer = trace.getTracer(this.config.tracerName!, this.config.version)
 
     this.initializeMetrics()
   }
 
-  private initializeMetrics() {
-    if (!this.config.metricsEnabled) {
-      this.initializeNoOpMetrics()
-      return
-    }
+  child(config: Partial<TelemetryConfig>): RedisStreamTelemetry {
+    return new RedisStreamTelemetry({ ...this.config, ...config })
+  }
 
+  private initializeMetrics() {
     // Counter for processed messages
     this.messagesProcessedCounter = this.meter.createCounter(
       'redis_stream_messages_processed_total',
@@ -87,30 +78,6 @@ export class RedisStreamTelemetry {
       {
         description: 'Time taken to process a batch of messages',
         unit: 's'
-      }
-    )
-
-    // Counter for errors
-    this.errorCounter = this.meter.createCounter('redis_stream_errors_total', {
-      description: 'Total number of processing errors',
-      unit: '1'
-    })
-
-    // Counter for retries
-    this.retryCounter = this.meter.createCounter(
-      'redis_stream_message_retries_total',
-      {
-        description: 'Number of message retry attempts',
-        unit: '1'
-      }
-    )
-
-    // Gauge for active consumers
-    this.activeConsumersGauge = this.meter.createGauge(
-      'redis_stream_active_consumers',
-      {
-        description: 'Number of currently active consumer threads',
-        unit: '1'
       }
     )
 
@@ -131,33 +98,6 @@ export class RedisStreamTelemetry {
         unit: '1'
       }
     )
-
-    // Counter for Redis operations
-    this.redisOperationsCounter = this.meter.createCounter(
-      'redis_operations_total',
-      {
-        description: 'Total number of Redis operations',
-        unit: '1'
-      }
-    )
-
-    // Histogram for Redis operation duration
-    this.redisOperationDurationHistogram = this.meter.createHistogram(
-      'redis_operation_duration_seconds',
-      {
-        description: 'Duration of Redis operations',
-        unit: 's'
-      }
-    )
-
-    // Counter for dead letter messages
-    this.deadLetterCounter = this.meter.createCounter(
-      'redis_stream_dead_letter_messages_total',
-      {
-        description: 'Total number of messages moved to dead letter queue',
-        unit: '1'
-      }
-    )
   }
 
   private initializeNoOpMetrics() {
@@ -167,14 +107,8 @@ export class RedisStreamTelemetry {
 
     this.messagesProcessedCounter = noOpCounter
     this.processingDurationHistogram = noOpHistogram
-    this.errorCounter = noOpCounter
-    this.retryCounter = noOpCounter
-    this.activeConsumersGauge = noOpGauge
     this.batchSizeHistogram = noOpHistogram
     this.pendingMessagesGauge = noOpGauge
-    this.redisOperationsCounter = noOpCounter
-    this.redisOperationDurationHistogram = noOpHistogram
-    this.deadLetterCounter = noOpCounter
   }
 
   // Tracing methods
@@ -182,10 +116,6 @@ export class RedisStreamTelemetry {
     name: string,
     attributes: Record<string, string | number> = {}
   ): Span {
-    if (!this.config.tracingEnabled) {
-      return trace.getActiveSpan() || trace.getTracer('noop').startSpan('noop')
-    }
-
     return this.tracer.startSpan(name, {
       kind: SpanKind.INTERNAL,
       attributes
@@ -195,134 +125,38 @@ export class RedisStreamTelemetry {
   // Metrics recording methods
   recordMessagesProcessed(
     count: number,
-    labels: {
-      streamName: string
-      consumerGroup: string
-      consumerId: string
-      status: 'success' | 'error'
-    }
+    labels: { status: 'success' | 'error' }
   ) {
     this.messagesProcessedCounter.add(count, {
-      stream_name: labels.streamName,
-      consumer_group: labels.consumerGroup,
-      consumer_id: labels.consumerId,
+      stream_name: this.config.streamName,
+      consumer_group: this.config.consumerGroup,
+      consumer_id: this.config.consumerId,
       status: labels.status
     })
   }
 
-  recordProcessingDuration(
-    duration: number,
-    labels: {
-      streamName: string
-      consumerGroup: string
-      consumerId: string
-    }
-  ) {
+  recordProcessingDuration(duration: number) {
     this.processingDurationHistogram.record(duration, {
-      stream_name: labels.streamName,
-      consumer_group: labels.consumerGroup,
-      consumer_id: labels.consumerId
+      stream_name: this.config.streamName,
+      consumer_group: this.config.consumerGroup,
+      consumer_id: this.config.consumerId
     })
   }
 
-  recordError(labels: {
-    streamName: string
-    consumerGroup: string
-    consumerId: string
-    errorType: string
-  }) {
-    this.errorCounter.add(1, {
-      stream_name: labels.streamName,
-      consumer_group: labels.consumerGroup,
-      consumer_id: labels.consumerId,
-      error_type: labels.errorType
-    })
-  }
-
-  recordRetry(labels: {
-    streamName: string
-    consumerGroup: string
-    attemptCount: number
-  }) {
-    this.retryCounter.add(1, {
-      stream_name: labels.streamName,
-      consumer_group: labels.consumerGroup,
-      attempt_count: labels.attemptCount.toString()
-    })
-  }
-
-  recordActiveConsumers(
-    count: number,
-    labels: {
-      streamName: string
-      consumerGroup: string
-    }
-  ) {
-    this.activeConsumersGauge.record(count, {
-      stream_name: labels.streamName,
-      consumer_group: labels.consumerGroup
-    })
-  }
-
-  recordBatchSize(
-    size: number,
-    labels: {
-      streamName: string
-      consumerGroup: string
-    }
-  ) {
+  recordBatchSize(size: number) {
     this.batchSizeHistogram.record(size, {
-      stream_name: labels.streamName,
-      consumer_group: labels.consumerGroup
+      stream_name: this.config.streamName,
+      consumer_group: this.config.consumerGroup
     })
   }
 
-  recordPendingMessages(
-    count: number,
-    labels: {
-      streamName: string
-      consumerGroup: string
-    }
-  ) {
+  recordPendingMessages(count: number) {
     this.pendingMessagesGauge.record(count, {
-      stream_name: labels.streamName,
-      consumer_group: labels.consumerGroup
+      stream_name: this.config.streamName,
+      consumer_group: this.config.consumerGroup
     })
   }
 
-  recordRedisOperation(
-    operation: string,
-    duration: number,
-    labels: {
-      streamName?: string
-      success: boolean
-    }
-  ) {
-    const attributes = {
-      operation,
-      ...(labels.streamName && { stream_name: labels.streamName }),
-      status: labels.success ? 'success' : 'error'
-    }
-
-    this.redisOperationsCounter.add(1, attributes)
-    this.redisOperationDurationHistogram.record(duration, attributes)
-  }
-
-  recordDeadLetter(labels: {
-    streamName: string
-    consumerGroup: string
-    consumerId: string
-    reason?: string
-  }) {
-    this.deadLetterCounter.add(1, {
-      stream_name: labels.streamName,
-      consumer_group: labels.consumerGroup,
-      consumer_id: labels.consumerId,
-      reason: labels.reason || 'retry_limit_exceeded'
-    })
-  }
-
-  // Utility methods for measuring time
   startTimer(): () => number {
     const start = Date.now()
     return () => (Date.now() - start) / 1000
@@ -366,20 +200,4 @@ export class RedisStreamTelemetry {
       }
     })
   }
-}
-
-// Global instance (optional - users can create their own)
-let globalTelemetry: RedisStreamTelemetry | null = null
-
-export function getTelemetry(
-  config?: Partial<TelemetryConfig>
-): RedisStreamTelemetry {
-  if (!globalTelemetry || config) {
-    globalTelemetry = new RedisStreamTelemetry(config)
-  }
-  return globalTelemetry
-}
-
-export function configureTelemetry(config: Partial<TelemetryConfig>): void {
-  globalTelemetry = new RedisStreamTelemetry(config)
 }
