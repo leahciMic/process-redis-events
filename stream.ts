@@ -11,42 +11,21 @@ import {
 import assert from 'node:assert'
 import memoize from 'memoize'
 import type { QueueItem } from './lib/QueueItem.js'
-
-type Json = string | number | boolean | null | Json[] | { [key: string]: Json }
-
-type StreamProgressEvent = {
-  type: 'progress'
-  completionRatio: number
-  status: string
-}
-
-type StreamCompletedEvent = {
-  type: 'completed'
-}
-
-type StreamFailedEvent = {
-  type: 'failed'
-  error: string
-}
-
-type StreamStartedEvent = {
-  type: 'started'
-}
-
-export type StreamEvent = { id: string } & (
-  | StreamProgressEvent
-  | StreamCompletedEvent
-  | StreamFailedEvent
-  | StreamStartedEvent
-)
+import type { Json } from './lib/constants.js'
+import type { StreamEvent } from './lib/StreamEvent.js'
 
 export class Stream<T extends Json, X extends unknown> {
+  /** A Redis client instance */
   private readonly redis: Redis
   private readonly telemetry: RedisStreamTelemetry
 
-  private readonly streamName: string
+  /** The name of the stream */
+  private readonly name: string
+  /** Function to create Redis clients */
   private readonly createRedis = () => new Redis()
+  /** Whether to produce event messages for stream processing */
   private readonly produceEvents: boolean = false
+  /** Bulk map for efficiently transforming stream data */
   private readonly map: (data: T) => X
 
   constructor(options: {
@@ -56,7 +35,7 @@ export class Stream<T extends Json, X extends unknown> {
     produceEvents?: boolean
     telemetryConfig?: Partial<TelemetryConfig>
   }) {
-    this.streamName = options.streamName
+    this.name = options.streamName
     this.createRedis = options.createRedis
     this.produceEvents = options.produceEvents ?? false
     this.redis = this.createRedis()
@@ -68,7 +47,7 @@ export class Stream<T extends Json, X extends unknown> {
 
   private createEventStreamImpl() {
     return new Stream<StreamEvent, StreamEvent>({
-      streamName: `${this.streamName}:events`,
+      streamName: `${this.name}:events`,
       createRedis: this.createRedis,
       produceEvents: false,
       map: (x) => x
@@ -76,12 +55,12 @@ export class Stream<T extends Json, X extends unknown> {
   }
 
   async clear() {
-    await this.redis.del(this.streamName)
+    await this.redis.del(this.name)
   }
 
   async add(data: T) {
     const id = await this.redis.xadd(
-      this.streamName,
+      this.name,
       '*',
       'data',
       JSON.stringify(data)
@@ -94,13 +73,11 @@ export class Stream<T extends Json, X extends unknown> {
     options: Omit<processRedisStreamOptions<T>, 'stream'> & {
       telemetryConfig?: Partial<TelemetryConfig>
     },
-    callback: (entries: QueueItem<T>[]) => Promise<void>,
-    concurrency = 1
+    callback: (entries: QueueItem<T>[]) => Promise<void>
   ) {
     return processRedisStream(
       {
-        stream: this.streamName,
-        telemetry: this.telemetry,
+        stream: this.name,
         createRedis: this.createRedis,
         onStart: async (id) => {
           if (this.produceEvents) {
@@ -111,7 +88,7 @@ export class Stream<T extends Json, X extends unknown> {
           if (this.produceEvents) {
             await this.createEventStream().add({ id, type: 'completed' })
             // Clean up job metadata after completion
-            await this.redis.del(`stream:${this.streamName}:j:${id}`)
+            await this.redis.del(`stream:${this.name}:j:${id}`)
           }
         },
         onError: async (id, error) => {
@@ -135,14 +112,8 @@ export class Stream<T extends Json, X extends unknown> {
         },
         ...options
       },
-      callback,
-      concurrency
+      callback
     )
-  }
-
-  // Get telemetry instance for custom metrics
-  getTelemetry(): RedisStreamTelemetry {
-    return this.telemetry
   }
 
   // Utility methods for stream monitoring
@@ -151,7 +122,7 @@ export class Stream<T extends Json, X extends unknown> {
     lastGeneratedId: string
     groups: number
   }> {
-    const info = (await this.redis.xinfo('STREAM', this.streamName)) as any[]
+    const info = (await this.redis.xinfo('STREAM', this.name)) as any[]
 
     const result = {
       length: 0,
@@ -179,7 +150,7 @@ export class Stream<T extends Json, X extends unknown> {
 
     // Record stream length as pending messages metric
     this.telemetry.recordPendingMessages(result.length, {
-      streamName: this.streamName,
+      streamName: this.name,
       consumerGroup: 'all' // Special label for overall stream length
     })
 
@@ -191,10 +162,7 @@ export class Stream<T extends Json, X extends unknown> {
     consumers: number
     lastDeliveredId: string
   }> {
-    const groups = (await this.redis.xinfo(
-      'GROUPS',
-      this.streamName
-    )) as any[][]
+    const groups = (await this.redis.xinfo('GROUPS', this.name)) as any[][]
 
     // Find the specific consumer group
     const groupInfo = groups.find((group: any[]) => {
@@ -236,7 +204,7 @@ export class Stream<T extends Json, X extends unknown> {
 
     // Record pending messages for this consumer group
     this.telemetry.recordPendingMessages(result.pending, {
-      streamName: this.streamName,
+      streamName: this.name,
       consumerGroup
     })
 
@@ -248,7 +216,7 @@ export class Stream<T extends Json, X extends unknown> {
     length: number
     lastGeneratedId: string
   }> {
-    const dlqStreamName = `${this.streamName}-dlq`
+    const dlqStreamName = `${this.name}-dlq`
 
     try {
       const info = (await this.redis.xinfo('STREAM', dlqStreamName)) as any[]
@@ -295,7 +263,7 @@ export class Stream<T extends Json, X extends unknown> {
       data: any
     }>
   > {
-    const dlqStreamName = `${this.streamName}-dlq`
+    const dlqStreamName = `${this.name}-dlq`
 
     try {
       const messages = await this.redis.xrevrange(
