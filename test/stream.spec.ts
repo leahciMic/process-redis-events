@@ -12,7 +12,11 @@ let shouldRetry: ReturnType<typeof vi.fn>
 describe('stream', () => {
   beforeEach(async () => {
     vi.resetAllMocks()
-    stream = new Stream(nanoid(), () => new Redis(), true)
+    stream = new Stream({
+      streamName: nanoid(),
+      createRedis: () => new Redis(),
+      produceEvents: true
+    })
     mockFn = vi.fn()
     shouldRetry = vi.fn().mockReturnValue(true)
     stop = stream.process(
