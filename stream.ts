@@ -11,8 +11,12 @@ import {
 import assert from 'node:assert'
 import memoize from 'memoize'
 import type { QueueItem } from './lib/QueueItem.js'
-import type { Json } from './lib/constants.js'
+import { StartFrom, type Json } from './lib/constants.js'
 import type { StreamEvent } from './lib/StreamEvent.js'
+import { HeartbeatManager } from './lib/HeartbeatManager.js'
+import { nanoid } from 'nanoid'
+import { createGroup } from './lib/createGroup.js'
+import { getEntries } from './lib/getEntries.js'
 
 export class Stream<T extends Json, X extends unknown> {
   /** A Redis client instance */
@@ -69,51 +73,198 @@ export class Stream<T extends Json, X extends unknown> {
     return { id }
   }
 
-  process(
-    options: Omit<processRedisStreamOptions<T>, 'stream'> & {
+  async process(
+    {
+      consumerGroup,
+      consumerId = nanoid(),
+      batchSize = 10,
+      timeout = 10_000,
+      blockFor = 100,
+      startFrom = StartFrom.Latest,
+      shouldRetry,
+      onComplete,
+      onError,
+      onStart,
+      onProgress,
+      telemetry,
+      signal
+    }: Omit<processRedisStreamOptions<T>, 'stream'> & {
       telemetryConfig?: Partial<TelemetryConfig>
     },
     callback: (entries: QueueItem<T>[]) => Promise<void>
   ) {
-    return processRedisStream(
-      {
-        stream: this.name,
-        createRedis: this.createRedis,
-        onStart: async (id) => {
-          if (this.produceEvents) {
-            await this.createEventStream().add({ id, type: 'started' })
-          }
-        },
-        onComplete: async (id) => {
-          if (this.produceEvents) {
-            await this.createEventStream().add({ id, type: 'completed' })
-            // Clean up job metadata after completion
-            await this.redis.del(`stream:${this.name}:j:${id}`)
-          }
-        },
-        onError: async (id, error) => {
-          if (this.produceEvents) {
-            await this.createEventStream().add({
-              id,
-              type: 'failed',
-              error: error.message
-            })
-          }
-        },
-        onProgress: async (id, completionRatio, status) => {
-          if (this.produceEvents) {
-            await this.createEventStream().add({
-              id,
-              type: 'progress',
-              completionRatio,
-              status
-            })
-          }
-        },
-        ...options
-      },
-      callback
+    const redis = this.createRedis()
+
+    const heartbeatManager = new HeartbeatManager(
+      this.redis,
+      this.name,
+      consumerGroup,
+      consumerId
     )
+
+    signal.addEventListener('abort', async () => {
+      await redis.quit()
+      await this.redis.quit()
+    })
+
+    await createGroup(redis, this.name, consumerGroup, startFrom)
+
+    while (!signal.aborted) {
+      const entries = await getEntries({
+        redis,
+        stream: this.name,
+        consumerGroup,
+        consumerId,
+        blockFor,
+        batchSize,
+        timeout: timeout * 2,
+        signal
+      })
+
+      const allItems =
+        entries?.map(({ id, value, attempts }): QueueItem<T> => {
+          heartbeatManager.add(id)
+
+          return {
+            id,
+            value,
+            attempts,
+            error: (error: Error) => {
+              heartbeatManager.remove(id)
+              onError?.(id, error)
+            },
+            reportProgress: async (completionRatio: number, status: string) => {
+              if (completionRatio < 0 || completionRatio > 1) {
+                throw new Error('Percent must be between 0 and 1')
+              }
+              onProgress?.(id, completionRatio, status)
+            },
+            ack: async () => {
+              heartbeatManager.remove(id)
+              await this.redis.xack(this.name, consumerGroup, id)
+              await onComplete?.(id)
+            },
+            del: async () => {
+              heartbeatManager.remove(id)
+              await this.redis.xdel(this.name, id)
+            }
+          }
+        }) ?? []
+
+      const queueItems = await Promise.all(
+        allItems.map(async (item) => {
+          if (
+            shouldRetry &&
+            item.attempts > 0 &&
+            !shouldRetry(item.attempts, item.value)
+          ) {
+            // Message exceeded retry limit - move to dead letter queue
+            const dlqStreamName = `${this.name}-dlq`
+
+            try {
+              // Add to dead letter queue with original data plus metadata
+              await redis.xadd(
+                dlqStreamName,
+                '*',
+                'originalId',
+                item.id,
+                'attempts',
+                item.attempts.toString(),
+                'consumerGroup',
+                consumerGroup,
+                'consumerId',
+                consumerId,
+                'timestamp',
+                Date.now().toString(),
+                'data',
+                JSON.stringify(item.value)
+              )
+
+              // Acknowledge original message to remove from stream
+              await item.ack()
+
+              // Record as dead letter
+              telemetry.recordDeadLetter({
+                streamName: this.name,
+                consumerGroup,
+                consumerId,
+                reason: 'retry_limit_exceeded'
+              })
+            } catch (error) {
+              // If we can't add to DLQ, log error but still acknowledge to prevent infinite loop
+              console.error(
+                `Failed to add message to dead letter queue ${dlqStreamName}:`,
+                error
+              )
+              await item.ack()
+            }
+
+            return null // Filter out this item
+          }
+          return item
+        })
+      ).then((items) =>
+        items.filter((item): item is QueueItem<T> => item !== null)
+      )
+
+      if (signal.aborted) {
+        return
+      }
+      const timer = telemetry.startTimer()
+
+      queueItems.forEach((entry) => {
+        onStart?.(entry.id)
+      })
+
+      try {
+        await callback(queueItems)
+
+        const duration = timer()
+
+        // Record successful processing
+        telemetry.recordMessagesProcessed(queueItems.length, {
+          streamName: this.name,
+          consumerGroup,
+          consumerId,
+          status: 'success'
+        })
+
+        telemetry.recordProcessingDuration(duration, {
+          streamName: this.name,
+          consumerGroup,
+          consumerId
+        })
+      } catch (error) {
+        const duration = timer()
+
+        // Record failed processing
+        telemetry.recordMessagesProcessed(queueItems.length, {
+          streamName: this.name,
+          consumerGroup,
+          consumerId,
+          status: 'error'
+        })
+
+        telemetry.recordProcessingDuration(duration, {
+          streamName: this.name,
+          consumerGroup,
+          consumerId
+        })
+
+        telemetry.recordError({
+          streamName: this.name,
+          consumerGroup,
+          consumerId,
+          errorType: (error as Error).constructor.name
+        })
+
+        console.error('Error processing entries:', error)
+      } finally {
+        for (const entry of queueItems) {
+          heartbeatManager.remove(entry.id)
+        }
+      }
+    }
   }
 
   // Utility methods for stream monitoring
