@@ -10,8 +10,10 @@ let stop: (closeRedisConnection: boolean) => void
 let shouldRetry: ReturnType<typeof vi.fn>
 
 describe('stream', () => {
+  let abortController: AbortController
   beforeEach(async () => {
     vi.resetAllMocks()
+    abortController = new AbortController()
     stream = new Stream({
       name: nanoid(),
       createRedis: () => new Redis(),
@@ -19,20 +21,19 @@ describe('stream', () => {
     })
     mockFn = vi.fn()
     shouldRetry = vi.fn().mockReturnValue(true)
-    stop = stream.process(
+    stream.process(
       {
         consumerGroup: 'test-group',
         startFrom: StartFrom.Oldest,
-        timeout: 200,
-        shouldRetry,
-        blockFor: 10
+        signal: abortController.signal,
+        shouldRetry
       },
       mockFn
     )
   })
 
   afterEach(async () => {
-    stop(true)
+    abortController.abort()
     await stream.clear()
     await stream.createEventStream().clear()
   })
