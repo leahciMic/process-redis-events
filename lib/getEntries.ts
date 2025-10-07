@@ -12,12 +12,12 @@ export async function getEntries({
   consumerId,
   blockFor,
   batchSize,
-  timeout,
+  reclaimAfter,
   signal
 }: {
   redis: Redis
   consumerId: string
-  timeout: number
+  reclaimAfter: number
   batchSize: number
   blockFor: number
   stream: string
@@ -29,7 +29,7 @@ export async function getEntries({
       stream,
       consumerGroup,
       consumerId,
-      timeout,
+      reclaimAfter,
       RedisStreamCursors.Oldest,
       'COUNT',
       batchSize,

@@ -32,8 +32,6 @@ export class Stream<
   /** Bulk map for efficiently transforming stream data */
   private readonly map: MapFn
 
-  private type!: Mapped<MapFn>
-
   constructor(options: {
     name: string
     createRedis: () => Redis
@@ -142,17 +140,18 @@ export class Stream<
       startFrom = StartFrom.Latest,
       shouldRetry = () => true,
       signal,
-      concurrency = 10
+      concurrency = 10,
+      /** Lease duration for processing messages, leases are auto-extended */
+      leaseMs = 30_000
     }: {
-      createRedis: () => Redis
       signal: AbortSignal
-      stream: string
       consumerGroup: string
       consumerId?: string
       batchSize?: number
       startFrom?: StartFrom
       shouldRetry?: (attempt: number, entry: T) => boolean
       concurrency?: number
+      leaseMs?: number
     },
     callback: (queueItem: QueueItem<Mapped<MapFn>>) => Promise<void>
   ) {
@@ -160,6 +159,9 @@ export class Stream<
     const redis = this.redis
     const streamName = this.name
     const queue = new pQueue({ concurrency })
+    const heartbeat = Math.max(leaseMs / 2, 5_000)
+    const xclaimBlockTimeout = Math.max(leaseMs - 1_000, 100)
+    const reclaimAfter = leaseMs + 100
 
     const telemetry = this.telemetry.child({
       consumerGroup,
@@ -170,7 +172,8 @@ export class Stream<
       redis,
       streamName,
       consumerGroup,
-      consumerId
+      consumerId,
+      heartbeat
     )
 
     const eventStream = this.produceEvents ? this.createEventStream() : null
@@ -219,11 +222,13 @@ export class Stream<
         stream: streamName,
         consumerGroup,
         consumerId,
-        blockFor: 5_000,
+        blockFor: xclaimBlockTimeout,
         batchSize,
-        timeout: 30_000,
+        reclaimAfter,
         signal
       })
+
+      console.log(`Fetched ${entries?.length ?? 0} entries from stream`)
 
       const queueItems = await this.checkRetry(
         entries?.map(createQueueItem) ?? [],
@@ -232,6 +237,8 @@ export class Stream<
         consumerGroup,
         consumerId
       )
+
+      console.log(`Checked ${queueItems.length} queue items for retries`)
 
       if (signal.aborted) {
         return
@@ -245,10 +252,12 @@ export class Stream<
           'Map function returned incorrect number of items'
         )
 
-        const mappedQueueItems = mapped.map((data, index) => ({
-          ...queueItems[index]!,
-          data
-        }))
+        const mappedQueueItems: QueueItem<Mapped<MapFn>>[] = mapped.map(
+          (data, index) => ({
+            ...queueItems[index]!,
+            data: data as Mapped<MapFn>
+          })
+        )
 
         telemetry.recordBatchSize(mappedQueueItems.length)
 
@@ -257,6 +266,7 @@ export class Stream<
             const timer = telemetry.startTimer()
             try {
               await eventStream?.add({ id: item.id, type: 'started' })
+              console.log('calling callback for item', item.id, item.data)
               await callback(item)
               telemetry.recordMessagesProcessed(1, { status: 'success' })
               const duration = timer()
@@ -270,6 +280,7 @@ export class Stream<
                 error: (e as Error).message
               })
               telemetry.recordMessagesProcessed(1, { status: 'error' })
+              console.log(`Error processing item ${item.id}:`, e)
             } finally {
               heartbeatManager.remove(item.id)
             }
