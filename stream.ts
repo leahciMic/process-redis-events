@@ -32,6 +32,9 @@ export class Stream<
   /** Bulk map for efficiently transforming stream data */
   private readonly map: MapFn
 
+  private readonly streamKey: string
+  private readonly dlqStreamKey: string
+
   constructor(options: {
     name: string
     createRedis: () => Redis
@@ -50,6 +53,8 @@ export class Stream<
       ...(options.telemetryConfig ?? {})
     })
     this.map = (options.map ?? ((xs: T[]) => xs)) as MapFn
+    this.streamKey = `stream:${this.name}`
+    this.dlqStreamKey = `stream:dlq:${this.name}`
   }
 
   createEventStream = memoize(this.createEventStreamImpl.bind(this))
@@ -64,12 +69,12 @@ export class Stream<
   }
 
   async clear() {
-    await this.redis.del(this.name)
+    await this.redis.del(this.streamKey)
   }
 
   async add(data: T) {
     const id = await this.redis.xadd(
-      this.name,
+      this.streamKey,
       '*',
       'data',
       JSON.stringify(data)
@@ -81,7 +86,6 @@ export class Stream<
   private async checkRetry(
     items: QueueItem<T>[],
     shouldRetry: (attempts: number, data: T) => boolean | undefined,
-    streamName: string,
     consumerGroup: string,
     consumerId: string
   ): Promise<QueueItem<T>[]> {
@@ -93,12 +97,11 @@ export class Stream<
           !shouldRetry(item.attempts, item.data)
         ) {
           // Message exceeded retry limit - move to dead letter queue
-          const dlqStreamName = `${streamName}-dlq`
 
           try {
             // Add to dead letter queue with original data plus metadata
             await this.redis.xadd(
-              dlqStreamName,
+              this.dlqStreamKey,
               '*',
               'originalId',
               item.id,
@@ -116,11 +119,11 @@ export class Stream<
           } catch (error) {
             // If we can't add to DLQ, log error but still acknowledge to prevent infinite loop
             console.error(
-              `Failed to add message to dead letter queue ${dlqStreamName}:`,
+              `Failed to add message to dead letter queue ${this.dlqStreamKey}:`,
               error
             )
           } finally {
-            await this.redis.xack(streamName, consumerGroup, item.id)
+            await this.redis.xack(this.streamKey, consumerGroup, item.id)
           }
 
           return null // Filter out this item
@@ -157,7 +160,6 @@ export class Stream<
   ) {
     const streamRedis = this.createRedis()
     const redis = this.redis
-    const streamName = this.name
     const queue = new pQueue({ concurrency })
     const heartbeat = Math.max(leaseMs / 2, 5_000)
     const xclaimBlockTimeout = Math.max(leaseMs - 1_000, 100)
@@ -170,7 +172,7 @@ export class Stream<
 
     const heartbeatManager = new HeartbeatManager(
       redis,
-      streamName,
+      this.streamKey,
       consumerGroup,
       consumerId,
       heartbeat
@@ -212,14 +214,14 @@ export class Stream<
       }
     }
 
-    await createGroup(streamRedis, streamName, consumerGroup, startFrom)
+    await createGroup(streamRedis, this.streamKey, consumerGroup, startFrom)
 
     while (!signal.aborted) {
       await queue.onSizeLessThan(concurrency)
 
       const entries = await getEntries({
         redis: streamRedis,
-        stream: streamName,
+        stream: this.streamKey,
         consumerGroup,
         consumerId,
         blockFor: xclaimBlockTimeout,
@@ -233,7 +235,6 @@ export class Stream<
       const queueItems = await this.checkRetry(
         entries?.map(createQueueItem) ?? [],
         shouldRetry,
-        streamName,
         consumerGroup,
         consumerId
       )
@@ -271,7 +272,7 @@ export class Stream<
               telemetry.recordMessagesProcessed(1, { status: 'success' })
               const duration = timer()
               telemetry.recordProcessingDuration(duration)
-              await redis.xack(streamName, consumerGroup, item.id)
+              await redis.xack(this.streamKey, consumerGroup, item.id)
               await eventStream?.add({ id: item.id, type: 'completed' })
             } catch (e) {
               await eventStream?.add({
