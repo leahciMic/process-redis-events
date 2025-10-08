@@ -1,6 +1,6 @@
 {
   "name": "process-redis-events",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "A TypeScript library for processing Redis Stream events with consumer groups.",
   "type": "module",
   "files": [
@@ -19,7 +19,8 @@
     "@types/node": "^24.4.0",
     "@typescript-eslint/eslint-plugin": "^8.43.0",
     "eslint": "^9.35.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
@@ -28,7 +29,6 @@
     "nanoid": "^5.1.5",
     "p-defer": "^4.0.1",
     "p-queue": "^9.0.0",
-    "vitest": "^3.2.4",
     "zod": "^4.1.8"
   },
   "peerDependencies": {
