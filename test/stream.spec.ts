@@ -10,6 +10,7 @@ import {
 import { Stream, StartFrom, type StreamEvent } from '../index.js'
 import { Redis } from 'ioredis'
 import { nanoid } from 'nanoid'
+import pDefer from 'p-defer'
 
 let stream: Stream<{ foo: string }>
 let mockFn: Mock<Parameters<(typeof stream)['process']>[1]>
@@ -33,6 +34,8 @@ describe('stream', () => {
         startFrom: StartFrom.Oldest,
         leaseMs: 10,
         signal: abortController.signal,
+        batchSize: 1,
+        concurrency: 1,
         shouldRetry
       },
       mockFn
@@ -164,5 +167,50 @@ describe('stream', () => {
       { id, type: 'started' },
       { id, type: 'failed', error: 'Something went wrong' }
     ])
+  })
+
+  describe('Stream information', () => {
+    it('can get stream length', async () => {
+      // expect(await stream.getStreamInfo()).toEqual({})
+      await stream.add({ foo: 'one' })
+      await stream.add({ foo: 'two' })
+      expect(await stream.getStreamInfo()).toEqual({
+        entriesAdded: 2,
+        groups: 1,
+        length: 2
+      })
+    })
+    it('can get pending length', async () => {
+      // expect(await stream.getConsumerGroupsPendingCount()).toEqual([])
+      const deferred = pDefer()
+      mockFn.mockImplementation(async () => {
+        await deferred.promise
+      })
+      await stream.add({ foo: 'one' })
+      await stream.add({ foo: 'two' })
+
+      expect(await stream.getConsumerGroupsInfo()).toEqual([
+        {
+          name: 'test-group',
+          pending: 0,
+          lag: 2,
+          entriesRead: 0,
+          consumers: 1
+        }
+      ])
+      deferred.resolve()
+      await vi.waitFor(() => expect(mockFn).toHaveBeenCalledTimes(2), {
+        timeout: 10_000
+      })
+      expect(await stream.getConsumerGroupsInfo()).toEqual([
+        {
+          name: 'test-group',
+          pending: 0,
+          lag: 0,
+          entriesRead: 2,
+          consumers: 1
+        }
+      ])
+    })
   })
 })

@@ -10,6 +10,17 @@ import { nanoid } from 'nanoid'
 import { createGroup } from './lib/createGroup.js'
 import { getEntries } from './lib/getEntries.js'
 import pQueue from 'p-queue'
+import z from 'zod'
+import { chunk } from './lib/chunk.js'
+import { resultOf } from './lib/resultOf.js'
+
+const RedisGroupSchema = z.object({
+  name: z.string(),
+  consumers: z.number(),
+  pending: z.number(),
+  entriesRead: z.number(),
+  lag: z.number()
+})
 
 type Mapped<M> = M extends (a: unknown[]) => readonly (infer R)[] ? R : never
 
@@ -55,6 +66,74 @@ export class Stream<
     this.map = (options.map ?? ((xs: T[]) => xs)) as MapFn
     this.streamKey = `stream:${this.name}`
     this.dlqStreamKey = `stream:dlq:${this.name}`
+  }
+
+  public async getStreamLength() {
+    return await this.redis.xlen(this.streamKey)
+  }
+
+  public async getStreamInfo() {
+    const [infoErr, info] = await resultOf(
+      this.redis.xinfo('STREAM', this.streamKey) as Promise<
+        Array<string | number>
+      >
+    )
+    if (infoErr) {
+      if (
+        (infoErr as Error).message.includes('ERR no such key') ||
+        (infoErr as Error).message.includes('NOKEY')
+      ) {
+        return null // Stream does not exist
+      }
+      console.error(
+        `Error fetching info for stream ${this.streamKey}:`,
+        infoErr
+      )
+      return null
+    }
+
+    const obj: Record<string, unknown> = Object.fromEntries(chunk(info, 2))
+
+    const RedisStreamInfoSchema = z.object({
+      length: z.number(),
+      groups: z.number(),
+      entriesAdded: z.number().optional()
+    })
+
+    return RedisStreamInfoSchema.parse({
+      length: Number(obj['length']),
+      groups: Number(obj['groups']),
+      entriesAdded: obj['entries-added'] as number | undefined
+    })
+  }
+
+  public async getConsumerGroupsInfo() {
+    const [groupsReplyErr, groupsReply] = await resultOf(
+      this.redis.xinfo('GROUPS', this.streamKey) as Promise<
+        Array<Array<string | number>>
+      >
+    )
+    if (groupsReplyErr) {
+      console.error(
+        `Error fetching consumer groups for stream ${this.streamKey}:`,
+        groupsReplyErr
+      )
+      return []
+    }
+
+    const parsed = groupsReply.map((entry) => {
+      const obj: Record<string, unknown> = Object.fromEntries(chunk(entry, 2))
+
+      return RedisGroupSchema.parse({
+        name: obj['name'],
+        consumers: Number(obj['consumers']),
+        pending: Number(obj['pending']),
+        entriesRead: Number(obj['entries-read']),
+        lag: Number(obj['lag'])
+      })
+    })
+
+    return parsed
   }
 
   createEventStream = memoize(this.createEventStreamImpl.bind(this))
@@ -285,8 +364,8 @@ export class Stream<
             } finally {
               heartbeatManager.remove(item.id)
             }
-          }),
-          { signal }
+          })
+          // { signal }
         )
       } catch (error) {
         console.error('Error processing entries:', error)
