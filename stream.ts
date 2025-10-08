@@ -240,7 +240,7 @@ export class Stream<
     const streamRedis = this.createRedis()
     const redis = this.redis
     const queue = new pQueue({ concurrency })
-    const heartbeat = Math.max(leaseMs / 2, 5_000)
+    const heartbeat = Math.round(leaseMs / 2)
     const xclaimBlockTimeout = Math.max(leaseMs - 1_000, 100)
     const reclaimAfter = leaseMs + 100
 
@@ -309,16 +309,12 @@ export class Stream<
         signal
       })
 
-      console.log(`Fetched ${entries?.length ?? 0} entries from stream`)
-
       const queueItems = await this.checkRetry(
         entries?.map(createQueueItem) ?? [],
         shouldRetry,
         consumerGroup,
         consumerId
       )
-
-      console.log(`Checked ${queueItems.length} queue items for retries`)
 
       if (signal.aborted) {
         return
@@ -346,7 +342,6 @@ export class Stream<
             const timer = telemetry.startTimer()
             try {
               await eventStream?.add({ id: item.id, type: 'started' })
-              console.log('calling callback for item', item.id, item.data)
               await callback(item)
               telemetry.recordMessagesProcessed(1, { status: 'success' })
               const duration = timer()
@@ -360,7 +355,6 @@ export class Stream<
                 error: (e as Error).message
               })
               telemetry.recordMessagesProcessed(1, { status: 'error' })
-              console.log(`Error processing item ${item.id}:`, e)
             } finally {
               heartbeatManager.remove(item.id)
             }

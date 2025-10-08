@@ -169,6 +169,23 @@ describe('stream', () => {
     ])
   })
 
+  it.only('auto-extended leases', async () => {
+    const deferred = pDefer()
+    mockFn.mockImplementation(async () => {
+      await deferred.promise
+    })
+    await stream.add({ foo: 'one' })
+
+    await vi.waitFor(() => expect(mockFn).toHaveBeenCalled(), {
+      timeout: 10_000
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+
+    deferred.resolve()
+    expect(mockFn).toHaveBeenCalledTimes(1)
+  })
+
   describe('Stream information', () => {
     it('can get stream length', async () => {
       // expect(await stream.getStreamInfo()).toEqual({})

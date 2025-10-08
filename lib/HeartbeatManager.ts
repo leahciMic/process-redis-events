@@ -28,6 +28,7 @@ export class HeartbeatManager {
     if (this.jobIds.size === 0) {
       return
     }
+
     const pipeline = this.redis.pipeline()
     this.jobIds.forEach((jobId) => {
       pipeline.xclaim(
