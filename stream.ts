@@ -14,6 +14,8 @@ import z from 'zod'
 import { chunk } from './lib/chunk.js'
 import { resultOf } from './lib/resultOf.js'
 
+type MaybePromise<T> = T | Promise<T>
+
 const RedisGroupSchema = z.object({
   name: z.string(),
   consumers: z.number(),
@@ -22,14 +24,7 @@ const RedisGroupSchema = z.object({
   lag: z.number()
 })
 
-type Mapped<M> = M extends (a: unknown[]) => readonly (infer R)[] ? R : never
-
-export class Stream<
-  T extends Json,
-  MapFn extends (data: T[]) => Promise<readonly unknown[]> | unknown[] = (
-    data: T[]
-  ) => T[]
-> {
+export class Stream<T extends Json> {
   /** A Redis client instance */
   private readonly redis: Redis
   private readonly telemetry: RedisStreamTelemetry
@@ -40,8 +35,6 @@ export class Stream<
   private readonly createRedis = () => new Redis()
   /** Whether to produce event messages for stream processing */
   private readonly produceEvents: boolean = false
-  /** Bulk map for efficiently transforming stream data */
-  private readonly map: MapFn
 
   private readonly streamKey: string
   private readonly dlqStreamKey: string
@@ -49,7 +42,6 @@ export class Stream<
   constructor(options: {
     name: string
     createRedis: () => Redis
-    map?: MapFn
     produceEvents?: boolean
     telemetryConfig?: TelemetryConfig
   }) {
@@ -63,7 +55,6 @@ export class Stream<
       consumerId: 'all',
       ...(options.telemetryConfig ?? {})
     })
-    this.map = (options.map ?? ((xs: T[]) => xs)) as MapFn
     this.streamKey = `stream:${this.name}`
     this.dlqStreamKey = `stream:dlq:${this.name}`
   }
@@ -142,8 +133,7 @@ export class Stream<
     return new Stream<StreamEvent>({
       name: `${this.name}:events`,
       createRedis: this.createRedis,
-      produceEvents: false,
-      map: (x) => x
+      produceEvents: false
     })
   }
 
@@ -214,7 +204,7 @@ export class Stream<
     )
   }
 
-  async process(
+  async process<R, MapFn extends (data: T[]) => MaybePromise<R[]>>(
     {
       consumerGroup,
       consumerId = nanoid(),
@@ -223,6 +213,7 @@ export class Stream<
       shouldRetry = () => true,
       signal,
       concurrency = 10,
+      map = (xs) => xs as unknown as R[],
       /** Lease duration for processing messages, leases are auto-extended */
       leaseMs = 30_000
     }: {
@@ -231,11 +222,12 @@ export class Stream<
       consumerId?: string
       batchSize?: number
       startFrom?: StartFrom
+      map: MapFn
       shouldRetry?: (attempt: number, entry: T) => boolean
       concurrency?: number
       leaseMs?: number
     },
-    callback: (queueItem: QueueItem<Mapped<MapFn>>) => Promise<void>
+    callback: (queueItem: QueueItem<R>) => Promise<void>
   ) {
     const streamRedis = this.createRedis()
     const redis = this.redis
@@ -321,19 +313,17 @@ export class Stream<
       }
 
       try {
-        const mapped = await this.map(queueItems.map((x) => x.data))
+        const mapped = await map(queueItems.map((x) => x.data))
 
         assert(
           mapped.length === queueItems.length,
           'Map function returned incorrect number of items'
         )
 
-        const mappedQueueItems: QueueItem<Mapped<MapFn>>[] = mapped.map(
-          (data, index) => ({
-            ...queueItems[index]!,
-            data: data as Mapped<MapFn>
-          })
-        )
+        const mappedQueueItems: QueueItem<R>[] = mapped.map((data, index) => ({
+          ...queueItems[index]!,
+          data: data as R
+        }))
 
         telemetry.recordBatchSize(mappedQueueItems.length)
 
