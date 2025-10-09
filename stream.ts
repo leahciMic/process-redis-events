@@ -138,7 +138,11 @@ export class Stream<T extends Json> {
   }
 
   async clear() {
-    await this.redis.del(this.streamKey)
+    await this.redis.del(this.streamKey).catch(() => {})
+    // await this.redis.del(this.dlqStreamKey).catch(() => {})
+
+    // const eventStream = this.createEventStream()
+    // await eventStream.clear().catch(() => {})
   }
 
   async add(data: T) {
@@ -204,7 +208,37 @@ export class Stream<T extends Json> {
     )
   }
 
-  async process<R, MapFn extends (data: T[]) => MaybePromise<R[]>>(
+  async process(
+    options: {
+      signal: AbortSignal
+      consumerGroup: string
+      consumerId?: string
+      batchSize?: number
+      startFrom?: StartFrom
+      map?: undefined
+      shouldRetry?: (attempt: number, entry: T) => boolean
+      concurrency?: number
+      leaseMs?: number
+    },
+    callback: (queueItem: QueueItem<T>) => Promise<void>
+  ): Promise<void>
+
+  async process<R>(
+    options: {
+      signal: AbortSignal
+      consumerGroup: string
+      consumerId?: string
+      batchSize?: number
+      startFrom?: StartFrom
+      map: (data: readonly T[]) => MaybePromise<readonly R[]>
+      shouldRetry?: (attempt: number, entry: T) => boolean
+      concurrency?: number
+      leaseMs?: number
+    },
+    callback: (queueItem: QueueItem<R>) => Promise<void>
+  ): Promise<void>
+
+  async process<R>(
     {
       consumerGroup,
       consumerId = nanoid(),
@@ -213,7 +247,7 @@ export class Stream<T extends Json> {
       shouldRetry = () => true,
       signal,
       concurrency = 10,
-      map = (xs) => xs as unknown as R[],
+      map,
       /** Lease duration for processing messages, leases are auto-extended */
       leaseMs = 30_000
     }: {
@@ -222,7 +256,7 @@ export class Stream<T extends Json> {
       consumerId?: string
       batchSize?: number
       startFrom?: StartFrom
-      map: MapFn
+      map?: (data: readonly any[]) => MaybePromise<readonly any[]>
       shouldRetry?: (attempt: number, entry: T) => boolean
       concurrency?: number
       leaseMs?: number
@@ -313,7 +347,9 @@ export class Stream<T extends Json> {
       }
 
       try {
-        const mapped = await map(queueItems.map((x) => x.data))
+        const mapped = map
+          ? await map(queueItems.map((x) => x.data))
+          : queueItems.map((x) => x.data)
 
         assert(
           mapped.length === queueItems.length,
@@ -322,7 +358,7 @@ export class Stream<T extends Json> {
 
         const mappedQueueItems: QueueItem<R>[] = mapped.map((data, index) => ({
           ...queueItems[index]!,
-          data: data as R
+          data
         }))
 
         telemetry.recordBatchSize(mappedQueueItems.length)

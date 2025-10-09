@@ -15,6 +15,7 @@ import pDefer from 'p-defer'
 let stream: Stream<{ foo: string }>
 let mockFn: Mock<Parameters<(typeof stream)['process']>[1]>
 let shouldRetry: ReturnType<typeof vi.fn>
+let mapFn = vi.fn((data) => data)
 
 describe('stream', () => {
   let abortController: AbortController
@@ -36,7 +37,8 @@ describe('stream', () => {
         signal: abortController.signal,
         batchSize: 1,
         concurrency: 1,
-        shouldRetry
+        shouldRetry,
+        map: mapFn
       },
       mockFn
     )
@@ -61,7 +63,7 @@ describe('stream', () => {
   })
 
   it('retries failed events', async () => {
-    mockFn.mockImplementationOnce(() => {
+    mockFn.mockImplementationOnce((e) => {
       throw new Error('Processing failed')
     })
 
@@ -169,7 +171,7 @@ describe('stream', () => {
     ])
   })
 
-  it.only('auto-extended leases', async () => {
+  it('auto-extended leases', async () => {
     const deferred = pDefer()
     mockFn.mockImplementation(async () => {
       await deferred.promise
@@ -186,6 +188,26 @@ describe('stream', () => {
     expect(mockFn).toHaveBeenCalledTimes(1)
   })
 
+  it('map works as expected', async () => {
+    stream.add({ foo: 'one' })
+    stream.add({ foo: 'two' })
+    mapFn.mockImplementation((data) => data.map((x) => ({ bar: x.foo })))
+    await vi.waitFor(() => expect(mockFn).toHaveBeenCalledTimes(2), {
+      timeout: 10_000
+    })
+    expect(mockFn).toHaveBeenNthCalledWith(1, {
+      id: expect.any(String),
+      attempts: 0,
+      data: { bar: 'one' },
+      reportProgress: expect.any(Function)
+    })
+    expect(mockFn).toHaveBeenNthCalledWith(2, {
+      id: expect.any(String),
+      attempts: 0,
+      data: { bar: 'two' },
+      reportProgress: expect.any(Function)
+    })
+  })
   describe('Stream information', () => {
     it('can get stream length', async () => {
       // expect(await stream.getStreamInfo()).toEqual({})
