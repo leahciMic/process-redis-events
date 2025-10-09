@@ -63,7 +63,7 @@ describe('stream', () => {
   })
 
   it('retries failed events', async () => {
-    mockFn.mockImplementationOnce((e) => {
+    mockFn.mockImplementationOnce(() => {
       throw new Error('Processing failed')
     })
 
@@ -191,7 +191,9 @@ describe('stream', () => {
   it('map works as expected', async () => {
     stream.add({ foo: 'one' })
     stream.add({ foo: 'two' })
-    mapFn.mockImplementation((data) => data.map((x) => ({ bar: x.foo })))
+    mapFn.mockImplementation((data) =>
+      data.map((x: { foo: string }) => ({ bar: x.foo }))
+    )
     await vi.waitFor(() => expect(mockFn).toHaveBeenCalledTimes(2), {
       timeout: 10_000
     })
