@@ -37,15 +37,9 @@ async def main() -> None:
 
     # Add some orders to the stream
     print("Adding orders to stream...")
-    await stream.add(
-        {"order_id": "001", "customer_id": "C123", "amount": 99.99}
-    )
-    await stream.add(
-        {"order_id": "002", "customer_id": "C456", "amount": 149.99}
-    )
-    await stream.add(
-        {"order_id": "003", "customer_id": "C789", "amount": 79.99}
-    )
+    await stream.add({"order_id": "001", "customer_id": "C123", "amount": 99.99})
+    await stream.add({"order_id": "002", "customer_id": "C456", "amount": 149.99})
+    await stream.add({"order_id": "003", "customer_id": "C789", "amount": 79.99})
 
     # Transformation function
     async def transform_orders(

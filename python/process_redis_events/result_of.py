@@ -7,10 +7,10 @@ T = TypeVar("T")
 
 async def result_of(coro_or_func: Any) -> tuple[None, T] | tuple[Exception, None]:
     """Safely unwrap the result of a coroutine or function.
-    
+
     Args:
         coro_or_func: The coroutine or function to execute
-        
+
     Returns:
         A tuple containing either (None, result) or (error, None)
     """

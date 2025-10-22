@@ -7,11 +7,11 @@ T = TypeVar("T")
 
 def chunk(array: list[T], size: int) -> list[list[T]]:
     """Split an array into chunks of specified size.
-    
+
     Args:
         array: The array to split
         size: The size of each chunk
-        
+
     Returns:
         List of chunks
     """

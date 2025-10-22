@@ -34,51 +34,61 @@ Welcome to the Python port of `process-redis-events`! This index will help you f
 ### "I want to..."
 
 #### **...get started quickly**
+
 → [QUICKSTART.md](QUICKSTART.md)
 
 #### **...understand the API**
+
 → [README.md](README.md)
 
 #### **...see working code**
+
 → [examples/](examples/)
 
 #### **...migrate from TypeScript**
+
 → [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)
 
 #### **...contribute to development**
+
 → [DEVELOPMENT.md](DEVELOPMENT.md)
 
 #### **...understand the project structure**
+
 → [STRUCTURE.md](STRUCTURE.md)
 
 #### **...learn about the port**
+
 → [PORT_SUMMARY.md](PORT_SUMMARY.md)
 
 #### **...get a high-level overview**
+
 → [OVERVIEW.md](OVERVIEW.md)
 
 ## 📑 Documentation Files
 
-| File | Purpose | Audience |
-|------|---------|----------|
-| **[README.md](README.md)** | Full API documentation | Users |
-| **[OVERVIEW.md](OVERVIEW.md)** | Complete overview | Everyone |
-| **[QUICKSTART.md](QUICKSTART.md)** | Quick start guide | New users |
-| **[MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)** | TS → Python guide | TS users |
-| **[DEVELOPMENT.md](DEVELOPMENT.md)** | Dev guide | Contributors |
-| **[STRUCTURE.md](STRUCTURE.md)** | Project structure | Developers |
-| **[PORT_SUMMARY.md](PORT_SUMMARY.md)** | Port details | Technical users |
-| **[examples/README.md](examples/README.md)** | Examples guide | All users |
+| File                                         | Purpose                | Audience        |
+| -------------------------------------------- | ---------------------- | --------------- |
+| **[README.md](README.md)**                   | Full API documentation | Users           |
+| **[OVERVIEW.md](OVERVIEW.md)**               | Complete overview      | Everyone        |
+| **[QUICKSTART.md](QUICKSTART.md)**           | Quick start guide      | New users       |
+| **[MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)** | TS → Python guide      | TS users        |
+| **[DEVELOPMENT.md](DEVELOPMENT.md)**         | Dev guide              | Contributors    |
+| **[STRUCTURE.md](STRUCTURE.md)**             | Project structure      | Developers      |
+| **[PORT_SUMMARY.md](PORT_SUMMARY.md)**       | Port details           | Technical users |
+| **[examples/README.md](examples/README.md)** | Examples guide         | All users       |
 
 ## 🔍 Quick Reference
 
 ### Installation
+
 ```bash
 cd python
 pip install -e .
 ```
 
 ### Basic Usage
+
 ```python
 from process_redis_events import Stream, StartFrom
 stream = Stream[MyData](name="test", create_redis=...)
@@ -86,11 +96,13 @@ await stream.add({"data": "value"})
 ```
 
 ### Running Tests
+
 ```bash
 make test
 ```
 
 ### Type Checking
+
 ```bash
 make typecheck
 ```
@@ -98,21 +110,25 @@ make typecheck
 ## 📚 Learning Path
 
 ### Beginner
+
 1. Read [QUICKSTART.md](QUICKSTART.md)
 2. Try [examples/basic_usage.py](examples/basic_usage.py)
 3. Read [README.md](README.md) sections as needed
 
 ### Intermediate
+
 1. Study all [examples/](examples/)
 2. Read [README.md](README.md) fully
 3. Understand [STRUCTURE.md](STRUCTURE.md)
 
 ### Advanced
+
 1. Read [DEVELOPMENT.md](DEVELOPMENT.md)
 2. Study [PORT_SUMMARY.md](PORT_SUMMARY.md)
 3. Review source code with types
 
 ### TypeScript Users
+
 1. Read [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)
 2. Compare examples with TS version
 3. Note API differences in guide
@@ -120,6 +136,7 @@ make typecheck
 ## 🎯 Common Tasks
 
 ### Running Examples
+
 ```bash
 cd examples
 python basic_usage.py
@@ -128,6 +145,7 @@ python telemetry_example.py
 ```
 
 ### Development Workflow
+
 ```bash
 make install-dev  # Setup
 make test         # Test

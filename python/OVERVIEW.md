@@ -15,6 +15,7 @@ A **complete, production-ready Python port** of the `process-redis-events` TypeS
 ## 📦 Package Contents
 
 ### Core Package (14 modules)
+
 ```
 process_redis_events/
 ├── stream.py              # Main Stream[T] class
@@ -34,6 +35,7 @@ process_redis_events/
 ```
 
 ### Tests (9 test cases)
+
 ```
 tests/
 └── test_stream.py
@@ -48,6 +50,7 @@ tests/
 ```
 
 ### Examples (3 working demos)
+
 ```
 examples/
 ├── basic_usage.py         # Complete workflow
@@ -57,6 +60,7 @@ examples/
 ```
 
 ### Documentation (8 files)
+
 ```
 README.md           # Main documentation
 QUICKSTART.md       # Getting started
@@ -101,16 +105,16 @@ async def main():
         create_redis=lambda: Redis.from_url("redis://localhost"),
         produce_events=True
     )
-    
+
     # Add task
     await stream.add({"task_id": "T1", "description": "Process order"})
-    
+
     # Process with retry logic
     async def process_task(item: QueueItem[Task]):
         print(f"Processing: {item.data['description']}")
         await item.report_progress(0.5, "Working...")
         await item.report_progress(1.0, "Done!")
-    
+
     shutdown = asyncio.Event()
     await stream.process(
         options={
@@ -130,6 +134,7 @@ asyncio.run(main())
 ## ✨ Key Features
 
 ### 1. Type Safety
+
 ```python
 # Full type inference and checking
 stream = Stream[MyData](...)  # Generic type parameter
@@ -138,6 +143,7 @@ async def callback(item: QueueItem[MyData]) -> None:
 ```
 
 ### 2. Data Transformation
+
 ```python
 # Transform data before processing
 async def transform(items: list[InputType]) -> list[OutputType]:
@@ -150,6 +156,7 @@ await stream.process(
 ```
 
 ### 3. Retry Logic
+
 ```python
 # Configurable retry with DLQ
 def should_retry(attempt: int, data: MyData) -> bool:
@@ -162,6 +169,7 @@ await stream.process(
 ```
 
 ### 4. Progress Tracking
+
 ```python
 async def process(item: QueueItem[MyData]) -> None:
     await item.report_progress(0.25, "Starting")
@@ -170,6 +178,7 @@ async def process(item: QueueItem[MyData]) -> None:
 ```
 
 ### 5. Event Streaming
+
 ```python
 stream = Stream[MyData](..., produce_events=True)
 event_stream = stream.create_event_stream()
@@ -180,6 +189,7 @@ async def track_events(item: QueueItem[StreamEvent]) -> None:
 ```
 
 ### 6. Telemetry
+
 ```python
 from process_redis_events.telemetry import TelemetryConfig
 
@@ -195,19 +205,19 @@ stream = Stream[MyData](..., telemetry_config=config)
 
 ## 🎯 Feature Comparison
 
-| Feature | TypeScript | Python | Status |
-|---------|------------|--------|--------|
-| Generic Types | `Stream<T>` | `Stream[T]` | ✅ |
-| Consumer Groups | ✅ | ✅ | ✅ |
-| Auto Retries | ✅ | ✅ | ✅ |
-| Dead Letter Queue | ✅ | ✅ | ✅ |
-| Heartbeats | ✅ | ✅ | ✅ |
-| OpenTelemetry | ✅ | ✅ | ✅ |
-| Event Streaming | ✅ | ✅ | ✅ |
-| Progress Reports | ✅ | ✅ | ✅ |
-| Data Transform | ✅ | ✅ | ✅ |
-| Concurrency | `p-queue` | `asyncio` | ✅ |
-| Type Safety | ✅ | ✅ | ✅ |
+| Feature           | TypeScript  | Python      | Status |
+| ----------------- | ----------- | ----------- | ------ |
+| Generic Types     | `Stream<T>` | `Stream[T]` | ✅     |
+| Consumer Groups   | ✅          | ✅          | ✅     |
+| Auto Retries      | ✅          | ✅          | ✅     |
+| Dead Letter Queue | ✅          | ✅          | ✅     |
+| Heartbeats        | ✅          | ✅          | ✅     |
+| OpenTelemetry     | ✅          | ✅          | ✅     |
+| Event Streaming   | ✅          | ✅          | ✅     |
+| Progress Reports  | ✅          | ✅          | ✅     |
+| Data Transform    | ✅          | ✅          | ✅     |
+| Concurrency       | `p-queue`   | `asyncio`   | ✅     |
+| Type Safety       | ✅          | ✅          | ✅     |
 
 ## 🔧 Development Tools
 
@@ -241,16 +251,19 @@ make clean        # Clean build artifacts
 ## 🔍 Technical Details
 
 ### Dependencies
+
 - **redis** >= 5.0.0 - Async Redis client
 - **typing-extensions** >= 4.5.0 - Backports
 - **pydantic** >= 2.0.0 - Validation
 - **opentelemetry-api** >= 1.20.0 - Telemetry
 
 ### Requirements
+
 - **Python** 3.10+ (for modern type syntax)
 - **Redis** 5.0+ (for stream support)
 
 ### Architecture
+
 - Async/await throughout
 - Proper resource cleanup
 - Comprehensive error handling
@@ -259,16 +272,20 @@ make clean        # Clean build artifacts
 ## 🏆 What Makes This Port Special
 
 ### 1. **Meticulous Attention to Detail**
+
 Every feature, every edge case, every test from TypeScript has been carefully ported.
 
 ### 2. **Not Just a Port - An Enhancement**
+
 While maintaining 100% feature parity, the Python version uses:
+
 - Modern Python 3.10+ type syntax
 - Idiomatic async/await patterns
 - PEP 8 compliant code style
 - Comprehensive type hints
 
 ### 3. **Production Ready**
+
 - All tests passing
 - Full type safety
 - Comprehensive error handling
@@ -276,6 +293,7 @@ While maintaining 100% feature parity, the Python version uses:
 - Well documented
 
 ### 4. **Excellent Developer Experience**
+
 - IDE autocomplete works perfectly
 - Type errors caught before runtime
 - Clear, helpful documentation
@@ -304,6 +322,7 @@ The Python port is **complete, tested, documented, and production-ready**! 🎉
 ## 🚀 Next Steps
 
 1. **Install and Try**
+
    ```bash
    cd python
    make install-dev
@@ -312,6 +331,7 @@ The Python port is **complete, tested, documented, and production-ready**! 🎉
    ```
 
 2. **Read the Docs**
+
    - Start with [QUICKSTART.md](QUICKSTART.md)
    - Explore [examples/](examples/)
    - Check [README.md](README.md) for full API

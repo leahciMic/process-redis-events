@@ -3,6 +3,7 @@
 ## Setup
 
 1. **Create a virtual environment:**
+
    ```bash
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -76,6 +77,7 @@ examples/
 ### Type Safety
 
 The library uses Python 3.10+ type hints extensively:
+
 - Generic types (`Stream[T]`, `QueueItem[T]`)
 - TypedDict for structured data
 - Proper async/await typing
@@ -84,6 +86,7 @@ The library uses Python 3.10+ type hints extensively:
 ### Async/Await
 
 All I/O operations are async:
+
 - Uses `redis.asyncio` for async Redis operations
 - `asyncio.Event` for signaling
 - `asyncio.Semaphore` for concurrency control
@@ -107,6 +110,7 @@ All I/O operations are async:
 ## Testing Strategy
 
 Tests cover:
+
 - ✓ Basic event processing
 - ✓ Retry logic
 - ✓ Infinite retries

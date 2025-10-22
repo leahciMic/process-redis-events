@@ -27,6 +27,7 @@ pip install process-redis-events
 ### 1. Start Redis
 
 Using Docker:
+
 ```bash
 docker run -d --name redis -p 6379:6379 redis:latest
 ```
@@ -53,17 +54,17 @@ async def main():
         name="tasks",
         create_redis=lambda: Redis.from_url("redis://localhost:6379"),
     )
-    
+
     # Add a task
     await stream.add({"task_id": "T1", "description": "Process invoice"})
-    
+
     # Process tasks
     async def process_task(item: QueueItem[Task]):
         print(f"Processing: {item.data['description']}")
         # Your logic here
-    
+
     shutdown_event = asyncio.Event()
-    
+
     # Start processing (in background or separate process)
     await stream.process(
         options={
@@ -93,12 +94,14 @@ python my_processor.py
 ## Verifying Installation
 
 Run the tests:
+
 ```bash
 cd python
 make test
 ```
 
 Type check:
+
 ```bash
 make typecheck
 ```
@@ -108,6 +111,7 @@ make typecheck
 ### ModuleNotFoundError
 
 Make sure you're in the right directory and have installed the package:
+
 ```bash
 cd python
 pip install -e .
@@ -116,6 +120,7 @@ pip install -e .
 ### Redis Connection Error
 
 Verify Redis is running:
+
 ```bash
 redis-cli ping
 # Should return: PONG
@@ -124,6 +129,7 @@ redis-cli ping
 ### Type Errors
 
 Make sure you're using Python 3.10 or higher:
+
 ```bash
 python --version
 # Should show: Python 3.10.x or higher

@@ -8,13 +8,13 @@ T = TypeVar("T")
 
 def parse_json(value: Any) -> Any:
     """Parse a JSON string.
-    
+
     Args:
         value: The value to parse (must be a string)
-        
+
     Returns:
         Parsed JSON data
-        
+
     Raises:
         ValueError: If value is not a string
         json.JSONDecodeError: If JSON parsing fails

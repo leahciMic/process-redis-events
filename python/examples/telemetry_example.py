@@ -48,9 +48,7 @@ async def main() -> None:
         nonlocal processed_count
         processed_count += 1
 
-        print(
-            f"Processing {item.data['metric_name']}: {item.data['value']}"
-        )
+        print(f"Processing {item.data['metric_name']}: {item.data['value']}")
 
         # Simulate work
         await asyncio.sleep(0.1)

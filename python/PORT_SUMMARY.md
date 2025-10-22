@@ -116,6 +116,7 @@ Options are now passed as a dictionary for better Python idioms.
 ## 🧪 Testing
 
 All TypeScript tests have been ported:
+
 - ✅ Basic processing
 - ✅ Retry mechanisms
 - ✅ Event emission
@@ -123,6 +124,7 @@ All TypeScript tests have been ported:
 - ✅ Stream metadata
 
 Run tests:
+
 ```bash
 cd python
 make test
@@ -131,12 +133,14 @@ make test
 ## 📦 Installation
 
 ### From source:
+
 ```bash
 cd python
 pip install -e .
 ```
 
 ### With dev dependencies:
+
 ```bash
 make install-dev
 ```
@@ -165,12 +169,12 @@ async def main():
         name="my-stream",
         create_redis=lambda: Redis.from_url("redis://localhost"),
     )
-    
+
     await stream.add({"value": "hello"})
-    
+
     async def process(item: QueueItem[MyData]):
         print(f"Processing: {item.data['value']}")
-    
+
     shutdown = asyncio.Event()
     await stream.process(
         options={"consumer_group": "workers", "signal": shutdown},

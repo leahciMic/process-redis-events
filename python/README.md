@@ -19,6 +19,7 @@ pip install process-redis-events
 ```
 
 For development:
+
 ```bash
 pip install process-redis-events[dev]
 ```
@@ -43,15 +44,15 @@ async def main():
         create_redis=lambda: Redis.from_url("redis://localhost"),
         produce_events=True
     )
-    
+
     # Add data to the stream
     await stream.add({"foo": "bar"})
-    
+
     # Process events
     async def process_item(item):
         print(f"Processing: {item.data}")
         # Your processing logic here
-    
+
     await stream.process(
         options={
             "consumer_group": "my-group",
@@ -115,12 +116,14 @@ await stream.process(
 Main class for processing Redis streams.
 
 **Constructor Parameters:**
+
 - `name`: Stream name
 - `create_redis`: Factory function returning Redis client
 - `produce_events`: Enable event stream (default: False)
 - `telemetry_config`: Optional telemetry configuration
 
 **Methods:**
+
 - `add(data: T) -> dict`: Add item to stream
 - `process(options, callback)`: Process stream items
 - `clear()`: Clear stream data
@@ -133,6 +136,7 @@ Main class for processing Redis streams.
 Represents a queue item being processed.
 
 **Attributes:**
+
 - `id`: Unique message ID
 - `data`: Message data (type T)
 - `attempts`: Number of processing attempts
@@ -141,6 +145,7 @@ Represents a queue item being processed.
 ### StartFrom
 
 Enum for consumer group starting position:
+
 - `StartFrom.OLDEST`: Start from beginning
 - `StartFrom.LATEST`: Start from latest
 
@@ -164,6 +169,7 @@ ISC License - see LICENSE file for details
 ## Contributing
 
 Contributions welcome! Please ensure:
+
 - All tests pass
 - Code is type-checked with mypy
 - Code is formatted with black

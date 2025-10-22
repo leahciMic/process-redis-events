@@ -3,6 +3,4 @@
 from typing import Any, TypeAlias
 
 # JSON-serializable types
-Json: TypeAlias = (
-    str | int | float | bool | None | dict[str, "Json"] | list["Json"]
-)
+Json: TypeAlias = str | int | float | bool | None | dict[str, "Json"] | list["Json"]

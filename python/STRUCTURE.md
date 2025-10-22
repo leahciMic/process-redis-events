@@ -52,34 +52,34 @@ python/
 
 ### Core Files
 
-| TypeScript | Python | Notes |
-|------------|--------|-------|
-| `index.ts` | `__init__.py` | Package exports |
-| `stream.ts` | `stream.py` | Main class, ~450 lines |
-| `telemetry.ts` | `telemetry.py` | OpenTelemetry, ~200 lines |
-| `lib/constants.ts` | `constants.py` | Enums |
-| `lib/QueueItem.ts` | `queue_item.py` | Generic type |
-| `lib/StreamEvent.ts` | `stream_event.py` | TypedDict unions |
-| `lib/chunk.ts` | `chunk.py` | Utility function |
-| `lib/parseJson.ts` | `parse_json.py` | JSON parsing |
-| `lib/resultOf.ts` | `result_of.py` | Error handling |
-| `lib/createGroup.ts` | `create_group.py` | Group creation |
-| `lib/getEntries.ts` | `get_entries.py` | Entry retrieval |
-| `lib/HeartbeatManager.ts` | `heartbeat_manager.py` | Heartbeats |
-| `lib/TypedEmitter.ts` | *(not needed)* | Python has asyncio |
+| TypeScript                | Python                 | Notes                     |
+| ------------------------- | ---------------------- | ------------------------- |
+| `index.ts`                | `__init__.py`          | Package exports           |
+| `stream.ts`               | `stream.py`            | Main class, ~450 lines    |
+| `telemetry.ts`            | `telemetry.py`         | OpenTelemetry, ~200 lines |
+| `lib/constants.ts`        | `constants.py`         | Enums                     |
+| `lib/QueueItem.ts`        | `queue_item.py`        | Generic type              |
+| `lib/StreamEvent.ts`      | `stream_event.py`      | TypedDict unions          |
+| `lib/chunk.ts`            | `chunk.py`             | Utility function          |
+| `lib/parseJson.ts`        | `parse_json.py`        | JSON parsing              |
+| `lib/resultOf.ts`         | `result_of.py`         | Error handling            |
+| `lib/createGroup.ts`      | `create_group.py`      | Group creation            |
+| `lib/getEntries.ts`       | `get_entries.py`       | Entry retrieval           |
+| `lib/HeartbeatManager.ts` | `heartbeat_manager.py` | Heartbeats                |
+| `lib/TypedEmitter.ts`     | _(not needed)_         | Python has asyncio        |
 
 ### Test Files
 
-| TypeScript | Python |
-|------------|--------|
+| TypeScript            | Python                 |
+| --------------------- | ---------------------- |
 | `test/stream.spec.ts` | `tests/test_stream.py` |
 
 ### Configuration
 
-| TypeScript | Python |
-|------------|--------|
-| `package.json` | `pyproject.toml` |
-| `tsconfig.json` | `pyproject.toml` (mypy config) |
+| TypeScript         | Python                           |
+| ------------------ | -------------------------------- |
+| `package.json`     | `pyproject.toml`                 |
+| `tsconfig.json`    | `pyproject.toml` (mypy config)   |
 | `vitest.config.ts` | `pyproject.toml` (pytest config) |
 
 ## Statistics
@@ -95,12 +95,14 @@ python/
 ## Key Technologies
 
 ### Runtime
+
 - Python 3.10+
 - redis-py (async)
 - pydantic (validation)
 - opentelemetry-api (telemetry)
 
 ### Development
+
 - pytest + pytest-asyncio (testing)
 - mypy (type checking)
 - black (formatting)

@@ -93,7 +93,7 @@ class Stream(Generic[T]):
         telemetry_config: TelemetryConfig | None = None,
     ):
         """Initialize a Stream.
-        
+
         Args:
             name: Name of the stream
             create_redis: Factory function to create Redis clients
@@ -139,16 +139,14 @@ class Stream(Generic[T]):
         return StreamInfo(
             length=int(obj.get(b"length", 0)),
             groups=int(obj.get(b"groups", 0)),
-            entries_added=int(obj[b"entries-added"])
-            if b"entries-added" in obj
-            else None,
+            entries_added=(
+                int(obj[b"entries-added"]) if b"entries-added" in obj else None
+            ),
         )
 
     async def get_consumer_groups_info(self) -> list[ConsumerGroupInfo]:
         """Get information about all consumer groups."""
-        error, groups_reply = await result_of(
-            self.redis.xinfo_groups(self.stream_key)
-        )
+        error, groups_reply = await result_of(self.redis.xinfo_groups(self.stream_key))
 
         if error:
             print(
@@ -167,7 +165,11 @@ class Stream(Generic[T]):
             obj = dict(chunk(entry, 2))
             parsed.append(
                 ConsumerGroupInfo(
-                    name=obj[b"name"].decode() if isinstance(obj[b"name"], bytes) else obj[b"name"],
+                    name=(
+                        obj[b"name"].decode()
+                        if isinstance(obj[b"name"], bytes)
+                        else obj[b"name"]
+                    ),
                     consumers=int(obj.get(b"consumers", 0)),
                     pending=int(obj.get(b"pending", 0)),
                     entries_read=int(obj.get(b"entries-read", 0)),
@@ -193,10 +195,10 @@ class Stream(Generic[T]):
 
     async def add(self, data: T) -> dict[str, str]:
         """Add data to the stream.
-        
+
         Args:
             data: Data to add
-            
+
         Returns:
             Dictionary with the message ID
         """
@@ -229,7 +231,9 @@ class Stream(Generic[T]):
                             "attempts": str(item.attempts),
                             "consumerGroup": consumer_group,
                             "consumerId": consumer_id,
-                            "timestamp": str(int(asyncio.get_event_loop().time() * 1000)),
+                            "timestamp": str(
+                                int(asyncio.get_event_loop().time() * 1000)
+                            ),
                             "data": json.dumps(item.data),
                         },
                     )
@@ -249,16 +253,14 @@ class Stream(Generic[T]):
         self,
         options: dict[str, Any],
         callback: Callable[[QueueItem[T]], Awaitable[None]],
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @overload
     async def process(
         self,
         options: dict[str, Any],
         callback: Callable[[QueueItem[R]], Awaitable[None]],
-    ) -> None:
-        ...
+    ) -> None: ...
 
     async def process(
         self,
@@ -266,7 +268,7 @@ class Stream(Generic[T]):
         callback: Callable[[QueueItem[Any]], Awaitable[None]],
     ) -> None:
         """Process items from the stream.
-        
+
         Args:
             options: Processing options including:
                 - signal: asyncio.Event for shutdown
@@ -383,8 +385,8 @@ class Stream(Generic[T]):
                 try:
                     if map_fn:
                         mapped = await map_fn([item.data for item in queue_items])
-                        assert (
-                            len(mapped) == len(queue_items)
+                        assert len(mapped) == len(
+                            queue_items
                         ), "Map function returned incorrect number of items"
                         mapped_queue_items = [
                             QueueItem(

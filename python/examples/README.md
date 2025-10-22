@@ -5,11 +5,13 @@ This directory contains example scripts demonstrating various features of the `p
 ## Prerequisites
 
 Make sure Redis is running:
+
 ```bash
 docker run -d -p 6379:6379 redis:latest
 ```
 
 Install the library:
+
 ```bash
 pip install -e ..
 ```
@@ -19,6 +21,7 @@ pip install -e ..
 ### 1. Basic Usage (`basic_usage.py`)
 
 Demonstrates:
+
 - Creating a stream
 - Adding data
 - Processing with transformation (map function)
@@ -27,6 +30,7 @@ Demonstrates:
 - Getting stream and consumer group information
 
 Run:
+
 ```bash
 python basic_usage.py
 ```
@@ -34,12 +38,14 @@ python basic_usage.py
 ### 2. Error Handling (`error_handling.py`)
 
 Demonstrates:
+
 - Retry logic
 - Dead letter queue (DLQ)
 - Configurable retry limits
 - Inspecting failed messages
 
 Run:
+
 ```bash
 python error_handling.py
 ```
@@ -47,11 +53,13 @@ python error_handling.py
 ### 3. Telemetry (`telemetry_example.py`)
 
 Demonstrates:
+
 - OpenTelemetry configuration
 - Metrics collection
 - Custom telemetry settings
 
 Run:
+
 ```bash
 python telemetry_example.py
 ```
@@ -122,6 +130,7 @@ await stream.process(
 ### Redis Connection Issues
 
 If you see connection errors, ensure Redis is running:
+
 ```bash
 redis-cli ping
 ```
@@ -131,6 +140,7 @@ Should return: `PONG`
 ### Import Errors
 
 Make sure the package is installed:
+
 ```bash
 pip install -e ..
 ```
@@ -138,6 +148,7 @@ pip install -e ..
 ### Test Cleanup
 
 Examples automatically clean up test data. If you need to manually clean:
+
 ```python
 await stream.clear()
 await stream.redis.delete(f"stream:dlq:{stream.name}")

@@ -105,11 +105,11 @@ class RedisStreamTelemetry:
 
     def create_span(self, name: str, attributes: dict[str, Any] | None = None) -> Span:
         """Create a new trace span.
-        
+
         Args:
             name: Name of the span
             attributes: Optional attributes to attach to the span
-            
+
         Returns:
             A new span
         """
@@ -121,7 +121,7 @@ class RedisStreamTelemetry:
         self, count: int, labels: dict[str, str] | None = None
     ) -> None:
         """Record the number of messages processed.
-        
+
         Args:
             count: Number of messages processed
             labels: Additional labels (e.g., {"status": "success"})
@@ -138,7 +138,7 @@ class RedisStreamTelemetry:
 
     def record_processing_duration(self, duration: float) -> None:
         """Record processing duration in seconds.
-        
+
         Args:
             duration: Duration in seconds
         """
@@ -153,7 +153,7 @@ class RedisStreamTelemetry:
 
     def record_batch_size(self, size: int) -> None:
         """Record the size of a processed batch.
-        
+
         Args:
             size: Number of items in the batch
         """
@@ -167,7 +167,7 @@ class RedisStreamTelemetry:
 
     def record_pending_messages(self, count: int) -> None:
         """Record the number of pending messages.
-        
+
         Args:
             count: Number of pending messages
         """
@@ -181,7 +181,7 @@ class RedisStreamTelemetry:
 
     def start_timer(self) -> Callable[[], float]:
         """Start a timer for measuring duration.
-        
+
         Returns:
             A function that when called returns the elapsed time in seconds
         """

@@ -44,7 +44,7 @@ async def get_entries(
     signal: asyncio.Event,
 ) -> list[EntryData]:
     """Get entries from a Redis stream with autoclaim.
-    
+
     Args:
         redis: Redis client
         stream: Stream name
@@ -54,7 +54,7 @@ async def get_entries(
         batch_size: Maximum number of messages to retrieve
         reclaim_after: Time before reclaiming messages (ms)
         signal: Event to signal shutdown
-        
+
     Returns:
         List of entry data
     """
@@ -129,7 +129,7 @@ async def get_entries(
             message_id_str = (
                 message_id.decode() if isinstance(message_id, bytes) else message_id
             )
-            
+
             # values is a dict[bytes, bytes]
             if not values or len(values) == 0:
                 data = None
