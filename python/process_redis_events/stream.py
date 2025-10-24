@@ -46,13 +46,16 @@ class ConsumerGroupInfo:
         name: str,
         consumers: int,
         pending: int,
-        entries_read: int,
-        lag: int,
+        last_delivered_id: str,
+        entries_read: int | None = None,
+        lag: int | None = None,
     ):
         self.name = name
         self.consumers = consumers
         self.pending = pending
+        self.last_delivered_id = last_delivered_id
         self.entries_read = entries_read
+        self.lag = lag
         self.lag = lag
 
 
@@ -130,17 +133,25 @@ class Stream(Generic[T]):
             print(f"Error fetching info for stream {self.stream_key}: {error}")
             return None
 
-        # Parse info - it's a list alternating keys and values
-        if not isinstance(info, list):
+        # redis-py returns a dict for xinfo_stream
+        if not isinstance(info, dict):
             return None
 
-        obj = dict(chunk(info, 2))
-
         return StreamInfo(
-            length=int(obj.get(b"length", 0)),
-            groups=int(obj.get(b"groups", 0)),
+            length=(
+                int(info.get("length", 0))
+                if "length" in info
+                else int(info.get(b"length", 0))
+            ),
+            groups=(
+                int(info.get("groups", 0))
+                if "groups" in info
+                else int(info.get(b"groups", 0))
+            ),
             entries_added=(
-                int(obj[b"entries-added"]) if b"entries-added" in obj else None
+                int(info["entries-added"])
+                if "entries-added" in info
+                else int(info[b"entries-added"]) if b"entries-added" in info else None
             ),
         )
 
@@ -157,25 +168,41 @@ class Stream(Generic[T]):
         if not isinstance(groups_reply, list):
             return []
 
+        # redis-py returns a list of dicts for xinfo_groups
         parsed = []
         for entry in groups_reply:
-            if not isinstance(entry, list):
+            if not isinstance(entry, dict):
                 continue
 
-            obj = dict(chunk(entry, 2))
-            parsed.append(
-                ConsumerGroupInfo(
-                    name=(
-                        obj[b"name"].decode()
-                        if isinstance(obj[b"name"], bytes)
-                        else obj[b"name"]
-                    ),
-                    consumers=int(obj.get(b"consumers", 0)),
-                    pending=int(obj.get(b"pending", 0)),
-                    entries_read=int(obj.get(b"entries-read", 0)),
-                    lag=int(obj.get(b"lag", 0)),
-                )
+            # Handle both decoded (str) and non-decoded (bytes) keys
+            name = entry.get("name") or entry.get(b"name")
+            consumers = entry.get("consumers") or entry.get(b"consumers")
+            pending = entry.get("pending") or entry.get(b"pending")
+            last_delivered_id = entry.get("last-delivered-id") or entry.get(
+                b"last-delivered-id"
             )
+            entries_read = entry.get("entries-read") or entry.get(b"entries-read")
+            lag = entry.get("lag") or entry.get(b"lag")
+
+            if name is not None:
+                # Decode if bytes
+                if isinstance(name, bytes):
+                    name = name.decode()
+                if isinstance(last_delivered_id, bytes):
+                    last_delivered_id = last_delivered_id.decode()
+
+                parsed.append(
+                    ConsumerGroupInfo(
+                        name=name,
+                        consumers=int(consumers) if consumers is not None else 0,
+                        pending=int(pending) if pending is not None else 0,
+                        last_delivered_id=last_delivered_id or "0-0",
+                        entries_read=(
+                            int(entries_read) if entries_read is not None else None
+                        ),
+                        lag=int(lag) if lag is not None else None,
+                    )
+                )
 
         return parsed
 

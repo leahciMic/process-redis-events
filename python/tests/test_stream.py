@@ -59,10 +59,10 @@ def should_retry() -> MagicMock:
 
 @pytest.fixture
 def map_fn() -> AsyncMock:
-    """Create a map function for transforming data."""
+    """Create a map function for transforming data (identity function)."""
 
-    async def _map(data: list[MyData]) -> list[dict[str, str]]:
-        return [{"bar": x["foo"]} for x in data]
+    async def _map(data: list[MyData]) -> list[MyData]:
+        return data
 
     return AsyncMock(side_effect=_map)
 
