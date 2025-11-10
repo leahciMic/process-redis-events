@@ -3,7 +3,7 @@
 import asyncio
 import json
 from functools import lru_cache
-from typing import Any, Awaitable, Callable, Generic, TypeVar, overload
+from typing import Any, Awaitable, Callable, Generic, TypeVar, overload, Protocol
 
 from redis.asyncio import Redis
 
@@ -20,6 +20,30 @@ from process_redis_events.types import Json
 
 T = TypeVar("T")
 R = TypeVar("R")
+
+
+class RetryFunction(Protocol):
+    """Protocol for retry decision functions."""
+
+    def __call__(self, attempt: int, entry: Any) -> bool:
+        """Decide whether to retry based on attempt count and entry data."""
+        ...
+
+
+class MapFunction(Protocol[T, R]):
+    """Protocol for map transformation functions."""
+
+    def __call__(self, items: list[T]) -> Awaitable[list[R]]:
+        """Transform a list of items to a list of results."""
+        ...
+
+
+class ProcessCallback(Protocol[T]):
+    """Protocol for processing callback functions."""
+
+    def __call__(self, item: QueueItem[T]) -> Awaitable[None]:
+        """Process a single queue item."""
+        ...
 
 
 def _generate_id() -> str:
@@ -60,29 +84,84 @@ class ConsumerGroupInfo:
 
 
 class ProcessOptions(Generic[T, R]):
-    """Options for processing a stream."""
+    """Options for processing a stream with proper typing."""
 
     def __init__(
         self,
+        *,
         signal: asyncio.Event,
         consumer_group: str,
         consumer_id: str | None = None,
         batch_size: int = 20,
         start_from: StartFrom = StartFrom.LATEST,
-        map: Callable[[list[T]], Awaitable[list[R]]] | None = None,
-        should_retry: Callable[[int, T], bool] | None = None,
+        map_fn: MapFunction[T, R] | None = None,
+        should_retry: RetryFunction | None = None,
         concurrency: int = 10,
         lease_ms: int = 30000,
     ):
+        """Initialize processing options.
+
+        Args:
+            signal: Event to signal shutdown
+            consumer_group: Name of the Redis consumer group
+            consumer_id: Optional consumer ID (generates one if not provided)
+            batch_size: Number of messages to process in each batch
+            start_from: Where to start reading from the stream
+            map_fn: Optional function to transform data before processing
+            should_retry: Optional function to determine retry logic
+            concurrency: Maximum number of concurrent processors
+            lease_ms: Message lease duration in milliseconds
+        """
         self.signal = signal
         self.consumer_group = consumer_group
         self.consumer_id = consumer_id or _generate_id()
         self.batch_size = batch_size
         self.start_from = start_from
-        self.map = map
+        self.map_fn = map_fn
         self.should_retry = should_retry or (lambda attempt, entry: True)
         self.concurrency = concurrency
         self.lease_ms = lease_ms
+
+
+def create_process_options(
+    signal: asyncio.Event,
+    consumer_group: str,
+    *,
+    consumer_id: str | None = None,
+    batch_size: int = 20,
+    start_from: StartFrom = StartFrom.LATEST,
+    map_fn: MapFunction[Any, Any] | None = None,
+    should_retry: RetryFunction | None = None,
+    concurrency: int = 10,
+    lease_ms: int = 30000,
+) -> ProcessOptions[Any, Any]:
+    """Create ProcessOptions with sensible defaults.
+
+    Args:
+        signal: Event to signal shutdown
+        consumer_group: Name of the Redis consumer group
+        consumer_id: Optional consumer ID (generates one if not provided)
+        batch_size: Number of messages to process in each batch
+        start_from: Where to start reading from the stream
+        map_fn: Optional function to transform data before processing
+        should_retry: Optional function to determine retry logic
+        concurrency: Maximum number of concurrent processors
+        lease_ms: Message lease duration in milliseconds
+
+    Returns:
+        Configured ProcessOptions instance
+    """
+    return ProcessOptions(
+        signal=signal,
+        consumer_group=consumer_group,
+        consumer_id=consumer_id,
+        batch_size=batch_size,
+        start_from=start_from,
+        map_fn=map_fn,
+        should_retry=should_retry,
+        concurrency=concurrency,
+        lease_ms=lease_ms,
+    )
 
 
 class Stream(Generic[T]):
@@ -91,7 +170,7 @@ class Stream(Generic[T]):
     def __init__(
         self,
         name: str,
-        create_redis: Callable[[], Redis],
+        create_redis: "Callable[[], Redis[Any]]",
         produce_events: bool = False,
         telemetry_config: TelemetryConfig | None = None,
     ):
@@ -157,7 +236,9 @@ class Stream(Generic[T]):
 
     async def get_consumer_groups_info(self) -> list[ConsumerGroupInfo]:
         """Get information about all consumer groups."""
-        error, groups_reply = await result_of(self.redis.xinfo_groups(self.stream_key))
+        error, groups_reply = await result_of(
+            self.redis.xinfo_groups(self.stream_key)  # type: ignore[no-untyped-call]
+        )
 
         if error:
             print(
@@ -278,47 +359,38 @@ class Stream(Generic[T]):
     @overload
     async def process(
         self,
-        options: dict[str, Any],
-        callback: Callable[[QueueItem[T]], Awaitable[None]],
+        options: ProcessOptions[T, T],
+        callback: ProcessCallback[T],
     ) -> None: ...
 
     @overload
     async def process(
         self,
-        options: dict[str, Any],
-        callback: Callable[[QueueItem[R]], Awaitable[None]],
+        options: ProcessOptions[T, R],
+        callback: ProcessCallback[R],
     ) -> None: ...
 
     async def process(
         self,
-        options: dict[str, Any],
-        callback: Callable[[QueueItem[Any]], Awaitable[None]],
+        options: ProcessOptions[T, Any],
+        callback: ProcessCallback[Any],
     ) -> None:
         """Process items from the stream.
 
         Args:
-            options: Processing options including:
-                - signal: asyncio.Event for shutdown
-                - consumer_group: Consumer group name
-                - consumer_id: Optional consumer ID
-                - batch_size: Messages per batch (default: 20)
-                - start_from: Starting position (default: LATEST)
-                - map: Optional transformation function
-                - should_retry: Optional retry decision function
-                - concurrency: Number of concurrent processors (default: 10)
-                - lease_ms: Message lease duration (default: 30000)
+            options: Processing options with proper typing
             callback: Async function to process each item
         """
-        # Parse options
-        signal = options["signal"]
-        consumer_group = options["consumer_group"]
-        consumer_id = options.get("consumer_id", _generate_id())
-        batch_size = options.get("batch_size", 20)
-        start_from = options.get("start_from", StartFrom.LATEST)
-        map_fn = options.get("map")
-        should_retry = options.get("should_retry", lambda attempt, entry: True)
-        concurrency = options.get("concurrency", 10)
-        lease_ms = options.get("lease_ms", 30000)
+        # Extract options with full type safety
+        signal = options.signal
+        consumer_group = options.consumer_group
+        consumer_id = options.consumer_id
+        batch_size = options.batch_size
+        start_from = options.start_from
+        map_fn = options.map_fn
+        should_retry = options.should_retry
+        concurrency = options.concurrency
+        lease_ms = options.lease_ms
 
         stream_redis = self.create_redis()
         redis = self.redis
@@ -353,7 +425,7 @@ class Stream(Generic[T]):
                         {
                             "id": entry.id,
                             "type": "progress",
-                            "completion_ratio": completion_ratio,
+                            "completionRatio": completion_ratio,
                             "status": status,
                         }
                     )
@@ -439,6 +511,7 @@ class Stream(Generic[T]):
                                 event_stream,
                                 consumer_group,
                                 heartbeat_manager,
+                                should_retry,
                             )
                         )
                         active_tasks.add(task)
@@ -452,7 +525,7 @@ class Stream(Generic[T]):
                 await asyncio.gather(*active_tasks, return_exceptions=True)
 
             await heartbeat_manager.stop()
-            await stream_redis.aclose()
+            await stream_redis.close()
 
     async def _process_item(
         self,
@@ -462,6 +535,7 @@ class Stream(Generic[T]):
         event_stream: "Stream[StreamEvent] | None",
         consumer_group: str,
         heartbeat_manager: HeartbeatManager,
+        should_retry: RetryFunction,
     ) -> None:
         """Process a single item."""
         timer = telemetry.start_timer()
@@ -485,5 +559,10 @@ class Stream(Generic[T]):
                     {"id": item.id, "type": "failed", "error": str(e)}
                 )
             telemetry.record_messages_processed(1, {"status": "error"})
+
+            # When processing fails, simply don't acknowledge the message
+            # Redis will track attempts through its internal pending system
+            # The message will be reclaimed later and _check_retry will handle should_retry logic
+
         finally:
             heartbeat_manager.remove(item.id)

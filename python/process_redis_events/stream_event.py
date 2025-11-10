@@ -7,7 +7,7 @@ class StreamProgressEvent(TypedDict):
     """Event indicating progress in processing."""
 
     type: Literal["progress"]
-    completion_ratio: float
+    completionRatio: float
     status: str
 
 

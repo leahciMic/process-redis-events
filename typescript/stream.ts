@@ -172,6 +172,14 @@ export class Stream<T extends Json> {
           // Message exceeded retry limit - move to dead letter queue
 
           try {
+            if (this.produceEvents) {
+              const eventStream = this.createEventStream()
+              await eventStream.add({
+                id: item.id,
+                type: 'failed',
+                error: 'Exceeded retry limit'
+              })
+            }
             // Add to dead letter queue with original data plus metadata
             await this.redis.xadd(
               this.dlqStreamKey,

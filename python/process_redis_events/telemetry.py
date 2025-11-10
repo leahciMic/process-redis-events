@@ -14,7 +14,7 @@ class TelemetryConfig:
     def __init__(
         self,
         enabled: bool = True,
-        version: str = "5.0.2",
+        version: str = "5.0.5",
         meter_name: str = "process-redis-events",
         tracer_name: str = "process-redis-events",
         stream_name: str = "",

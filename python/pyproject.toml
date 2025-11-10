@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "process-redis-events"
-version = "5.0.2"
+version = "5.0.5"
 description = "A Python library for processing Redis Stream events with consumer groups"
 authors = [
     {name = "Michael Leaney", email = "leahcimic@gmail.com"}

@@ -1,28 +1,28 @@
-"""Heartbeat manager for keeping messages claimed during processing."""
+"""Heartbeat manager for automatic lease extension."""
 
 import asyncio
-from typing import Set
+from typing import Any
 
 from redis.asyncio import Redis
 
 
 class HeartbeatManager:
-    """Manages heartbeats for active jobs to prevent message reclaim."""
+    """Manages automatic heartbeat/lease extension for messages being processed."""
 
     def __init__(
         self,
-        redis: Redis,
+        redis: "Redis[Any]",
         stream: str,
         consumer_group: str,
         consumer_id: str,
-        heartbeat_interval_ms: int = 15000,
+        interval_ms: int,
     ):
         self.redis = redis
         self.stream = stream
         self.consumer_group = consumer_group
         self.consumer_id = consumer_id
-        self.heartbeat_interval = heartbeat_interval_ms / 1000.0
-        self.job_ids: Set[str] = set()
+        self.heartbeat_interval = interval_ms / 1000.0
+        self.job_ids: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._running = False
 

@@ -1,12 +1,14 @@
 """Create consumer group utility."""
 
+from typing import Any
+
 from redis.asyncio import Redis
 
 from process_redis_events.constants import StartFrom
 
 
 async def create_group(
-    redis: Redis, stream: str, consumer_group: str, start_from: StartFrom
+    redis: "Redis[Any]", stream: str, consumer_group: str, start_from: StartFrom
 ) -> None:
     """Create a consumer group for a Redis stream.
 

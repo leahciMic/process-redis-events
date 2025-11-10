@@ -34,7 +34,7 @@ class EntryData:
 
 
 async def get_entries(
-    redis: Redis,
+    redis: "Redis[Any]",
     stream: str,
     consumer_group: str,
     consumer_id: str,
@@ -72,8 +72,9 @@ async def get_entries(
     if signal.is_set():
         return []
 
-    # claimed_response format: [next_id, [claimed_ids], [deleted_ids]]
-    claimed_ids = claimed_response[1] if len(claimed_response) > 1 else []
+    # With justid=True, redis-py returns a flat list of IDs
+    # Without justid, it returns [next_cursor, [(id, data)], deleted_ids]
+    claimed_ids = claimed_response if isinstance(claimed_response, list) else []
     claimed_count = len(claimed_ids)
 
     # Get pending info for claimed messages
@@ -148,10 +149,12 @@ async def get_entries(
 
 
 async def _get_pending_info(
-    redis: Redis, stream: str, consumer_group: str, message_id: str
+    redis: "Redis[Any]", stream: str, consumer_group: str, message_id: str
 ) -> PendingInfo | None:
     """Get pending information for a specific message."""
     try:
+        # Use XPENDING_RANGE to get details for a specific message ID
+        # XPENDING_RANGE stream group min_id max_id count
         pending_response = await redis.xpending_range(
             name=stream,
             groupname=consumer_group,
@@ -159,17 +162,25 @@ async def _get_pending_info(
             max=message_id,
             count=1,
         )
-
         if pending_response and len(pending_response) > 0:
+            # Response format from redis-py is a list of dicts with keys:
+            # 'message_id', 'consumer', 'time_since_delivered', 'times_delivered'
             info = pending_response[0]
-            # info format: {'message_id': ..., 'consumer': ..., 'time_since_delivered': ..., 'times_delivered': ...}
-            return PendingInfo(
-                id=info["message_id"],
-                consumer_id=info["consumer"],
+            result = PendingInfo(
+                id=(
+                    info["message_id"].decode()
+                    if isinstance(info["message_id"], bytes)
+                    else info["message_id"]
+                ),
+                consumer_id=(
+                    info["consumer"].decode()
+                    if isinstance(info["consumer"], bytes)
+                    else info["consumer"]
+                ),
                 idle_time=info["time_since_delivered"],
-                attempts=info["times_delivered"],
+                attempts=info["times_delivered"],  # This is the delivery count we want
             )
+            return result
     except Exception:
         pass
-
     return None
