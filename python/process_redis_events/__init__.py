@@ -14,7 +14,7 @@ from process_redis_events.stream import (
 )
 from process_redis_events.stream_event import StreamEvent
 
-__version__ = "5.0.5"
+__version__ = "5.0.6"
 
 __all__ = [
     "Stream",

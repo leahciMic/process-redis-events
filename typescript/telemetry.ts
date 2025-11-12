@@ -28,7 +28,7 @@ const defaults = {
   enabled: true,
   meterName: 'process-redis-events',
   tracerName: 'process-redis-events',
-  version: '5.0.3'
+  version: '5.0.4'
 }
 
 export class RedisStreamTelemetry {
