@@ -30,7 +30,7 @@ export class Stream<T extends Record<string, unknown>> {
   private readonly telemetry: RedisStreamTelemetry
 
   /** The name of the stream */
-  private readonly name: string
+  public readonly name: string
   /** Function to create Redis clients */
   private readonly createRedis = () => new Redis()
   /** Whether to produce event messages for stream processing */
@@ -69,11 +69,6 @@ export class Stream<T extends Record<string, unknown>> {
     /**
      * Collect the stream length, consumer groups info, DLQ length, and send telemetry
      */
-    if (this.name.startsWith('dlq:') || this.name.startsWith('events:')) {
-      // Don't send telemetry for DLQ or events streams, the parent stream will handle it
-      return
-    }
-
     try {
       const streamLength = await this.getStreamLength()
       this.telemetry.recordStreamLength(streamLength ?? 0)
@@ -100,8 +95,11 @@ export class Stream<T extends Record<string, unknown>> {
       console.error(error, 'Error getting consumer groups info for telemetry')
     }
 
-    await this.createDeadLetterQueueStream().sendStreamTelemetry()
-    await this.createEventStream().sendStreamTelemetry()
+    if (!this.name.startsWith('dlq:') && !this.name.startsWith('events:')) {
+      // Don't send telemetry for DLQ or events streams, the parent stream will handle it
+      await this.createDeadLetterQueueStream().sendStreamTelemetry()
+      await this.createEventStream().sendStreamTelemetry()
+    }
   }
 
   public async getStreamLength() {

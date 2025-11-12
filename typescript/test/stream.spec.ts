@@ -210,48 +210,107 @@ describe('stream', () => {
       reportProgress: expect.any(Function)
     })
   })
-  describe('Stream information', () => {
-    it('can get stream length', async () => {
-      // expect(await stream.getStreamInfo()).toEqual({})
-      await stream.add({ foo: 'one' })
-      await stream.add({ foo: 'two' })
-      expect(await stream.getStreamInfo()).toEqual({
-        entriesAdded: 2,
-        groups: 1,
-        length: 2
-      })
-    })
-    it('can get pending length', async () => {
-      // expect(await stream.getConsumerGroupsPendingCount()).toEqual([])
-      const deferred = pDefer()
-      mockFn.mockImplementation(async () => {
-        await deferred.promise
-      })
-      await stream.add({ foo: 'one' })
-      await stream.add({ foo: 'two' })
+})
 
-      expect(await stream.getConsumerGroupsInfo()).toEqual([
-        {
-          name: 'test-group',
-          pending: 0,
-          lag: 2,
-          entriesRead: 0,
-          consumers: 1
-        }
-      ])
-      deferred.resolve()
-      await vi.waitFor(() => expect(mockFn).toHaveBeenCalledTimes(2), {
-        timeout: 10_000
-      })
-      expect(await stream.getConsumerGroupsInfo()).toEqual([
-        {
-          name: 'test-group',
-          pending: 0,
-          lag: 0,
-          entriesRead: 2,
-          consumers: 1
-        }
-      ])
+describe('Stream information (without processing)', () => {
+  let stream: Stream<{ foo: string }>
+
+  beforeEach(async () => {
+    stream = new Stream({
+      name: nanoid(),
+      createRedis: () => new Redis(),
+      produceEvents: true
     })
+  })
+
+  afterEach(async () => {
+    await stream.clear()
+    await stream.createEventStream().clear()
+  })
+
+  it('can get stream length', async () => {
+    await stream.add({ foo: 'one' })
+    await stream.add({ foo: 'two' })
+    
+    // Create consumer group for the test
+    const abortController = new AbortController()
+    stream.process(
+      {
+        consumerGroup: 'test-group',
+        startFrom: StartFrom.Oldest,
+        signal: abortController.signal,
+        batchSize: 1,
+        concurrency: 1
+      },
+      async () => {
+        // Empty callback, we just need the group created
+      }
+    )
+    
+    // Wait for group creation
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    
+    expect(await stream.getStreamInfo()).toEqual({
+      entriesAdded: 2,
+      groups: 1,
+      length: 2
+    })
+    
+    abortController.abort()
+  })
+
+  it('can get pending length', async () => {
+    const abortController = new AbortController()
+    const deferred = pDefer()
+    
+    // Start processing with blocked callback
+    stream.process(
+      {
+        consumerGroup: 'test-group',
+        startFrom: StartFrom.Oldest,
+        signal: abortController.signal,
+        batchSize: 1,
+        concurrency: 1
+      },
+      async () => {
+        await deferred.promise
+      }
+    )
+    
+    // Wait for group creation
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    
+    await stream.add({ foo: 'one' })
+    await stream.add({ foo: 'two' })
+
+    // Wait briefly for messages to be consumed
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    expect(await stream.getConsumerGroupsInfo()).toEqual([
+      {
+        name: 'test-group',
+        pending: 2,
+        lag: 0,
+        entriesRead: 2,
+        consumers: 1
+      }
+    ])
+    
+    deferred.resolve()
+    
+    // Wait for processing to complete
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    
+    expect(await stream.getConsumerGroupsInfo()).toEqual([
+      {
+        name: 'test-group',
+        pending: 0,
+        lag: 0,
+        entriesRead: 2,
+        consumers: 1
+      }
+    ])
+    
+    abortController.abort()
   })
 })
