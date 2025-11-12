@@ -16,7 +16,6 @@ from process_redis_events.queue_item import QueueItem
 from process_redis_events.result_of import result_of
 from process_redis_events.stream_event import StreamEvent
 from process_redis_events.telemetry import RedisStreamTelemetry, TelemetryConfig
-from process_redis_events.types import Json
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -172,6 +171,7 @@ class Stream(Generic[T]):
         name: str,
         create_redis: "Callable[[], Redis[Any]]",
         produce_events: bool = False,
+        use_dlq: bool = True,
         telemetry_config: TelemetryConfig | None = None,
     ):
         """Initialize a Stream.
@@ -180,11 +180,13 @@ class Stream(Generic[T]):
             name: Name of the stream
             create_redis: Factory function to create Redis clients
             produce_events: Whether to produce event messages
+            use_dlq: Whether to use dead letter queue
             telemetry_config: Optional telemetry configuration
         """
         self.name = name
         self.create_redis = create_redis
         self.produce_events = produce_events
+        self.use_dlq = use_dlq
         self.redis = create_redis()
 
         config = telemetry_config or TelemetryConfig(
@@ -195,8 +197,48 @@ class Stream(Generic[T]):
         self.telemetry = RedisStreamTelemetry(config)
 
         self.stream_key = f"stream:{name}"
-        self.dlq_stream_key = f"stream:dlq:{name}"
+        self.dlq_stream_key = f"dlq:{name}"
+        self.events_stream_key = f"events:{name}"
         self._event_stream: "Stream[StreamEvent] | None" = None
+        self._dlq_stream: "Stream[T] | None" = None
+
+    async def send_stream_telemetry(self) -> None:
+        """Collect the stream length, consumer groups info, DLQ length, and send telemetry."""
+        if self.name.startswith("dlq:") or self.name.startswith("events:"):
+            # Don't send telemetry for DLQ or events streams, the parent stream will handle it
+            return
+
+        try:
+            stream_length = await self.get_stream_length()
+            self.telemetry.record_stream_length(stream_length)
+        except Exception as error:
+            print(f"Error getting stream length for telemetry: {error}")
+
+        try:
+            stream_info = await self.get_stream_info()
+            if stream_info and stream_info.entries_added is not None:
+                self.telemetry.record_entries_added(stream_info.entries_added)
+        except Exception as error:
+            print(f"Error getting stream info for telemetry: {error}")
+
+        try:
+            consumer_groups_info = await self.get_consumer_groups_info()
+
+            for group_info in consumer_groups_info:
+                self.telemetry.record_pending_messages(
+                    group_info.pending, group_info.name
+                )
+                if group_info.entries_read is not None:
+                    self.telemetry.record_entries_read(
+                        group_info.entries_read, group_info.name
+                    )
+                if group_info.lag is not None:
+                    self.telemetry.record_lag(group_info.lag, group_info.name)
+        except Exception as error:
+            print(f"Error getting consumer groups info for telemetry: {error}")
+
+        await self.create_dead_letter_queue_stream().send_stream_telemetry()
+        await self.create_event_stream().send_stream_telemetry()
 
     async def get_stream_length(self) -> int:
         """Get the length of the stream."""
@@ -291,11 +333,23 @@ class Stream(Generic[T]):
         """Create or get the event stream for this stream."""
         if self._event_stream is None:
             self._event_stream = Stream[StreamEvent](
-                name=f"{self.name}:events",
+                name=self.events_stream_key,
                 create_redis=self.create_redis,
                 produce_events=False,
+                use_dlq=False,
             )
         return self._event_stream
+
+    def create_dead_letter_queue_stream(self) -> "Stream[T]":
+        """Create or get the dead letter queue stream for this stream."""
+        if self._dlq_stream is None:
+            self._dlq_stream = Stream[T](
+                name=self.dlq_stream_key,
+                create_redis=self.create_redis,
+                use_dlq=False,
+                produce_events=False,
+            )
+        return self._dlq_stream
 
     async def clear(self) -> None:
         """Clear the stream by deleting its key."""
@@ -332,19 +386,31 @@ class Stream(Generic[T]):
             if item.attempts > 0 and not should_retry(item.attempts, item.data):
                 # Move to dead letter queue
                 try:
-                    await self.redis.xadd(
-                        name=self.dlq_stream_key,
-                        fields={
-                            "originalId": item.id,
-                            "attempts": str(item.attempts),
-                            "consumerGroup": consumer_group,
-                            "consumerId": consumer_id,
-                            "timestamp": str(
-                                int(asyncio.get_event_loop().time() * 1000)
-                            ),
-                            "data": json.dumps(item.data),
-                        },
-                    )
+                    if self.produce_events:
+                        event_stream = self.create_event_stream()
+                        await event_stream.add(
+                            {
+                                "id": item.id,
+                                "type": "failed",
+                                "error": "Exceeded retry limit",
+                            }
+                        )
+
+                    if self.use_dlq:
+                        # Add to DLQ with metadata embedded in the data
+                        dlq_data = {
+                            **item.data,  # type: ignore[misc]
+                            "_dlqMetadata": {
+                                "originalId": item.id,
+                                "attempts": item.attempts,
+                                "consumerGroup": consumer_group,
+                                "consumerId": consumer_id,
+                                "timestamp": int(
+                                    asyncio.get_event_loop().time() * 1000
+                                ),
+                            },
+                        }
+                        await self.create_dead_letter_queue_stream().add(dlq_data)  # type: ignore[arg-type]
                 except Exception as error:
                     print(
                         f"Failed to add message to dead letter queue {self.dlq_stream_key}: {error}"

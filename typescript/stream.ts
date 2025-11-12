@@ -3,7 +3,7 @@ import { RedisStreamTelemetry, type TelemetryConfig } from './telemetry.js'
 import assert from 'node:assert'
 import memoize from 'memoize'
 import type { QueueItem } from './lib/QueueItem.js'
-import { StartFrom, type Json } from './lib/constants.js'
+import { StartFrom } from './lib/constants.js'
 import type { StreamEvent } from './lib/StreamEvent.js'
 import { HeartbeatManager } from './lib/HeartbeatManager.js'
 import { nanoid } from 'nanoid'
@@ -24,7 +24,7 @@ const RedisGroupSchema = z.object({
   lag: z.number()
 })
 
-export class Stream<T extends Json> {
+export class Stream<T extends Record<string, unknown>> {
   /** A Redis client instance */
   private readonly redis: Redis
   private readonly telemetry: RedisStreamTelemetry
@@ -35,19 +35,24 @@ export class Stream<T extends Json> {
   private readonly createRedis = () => new Redis()
   /** Whether to produce event messages for stream processing */
   private readonly produceEvents: boolean = false
+  /** Whether to use dead letter queue */
+  private readonly useDLQ: boolean = true
 
   private readonly streamKey: string
   private readonly dlqStreamKey: string
+  private readonly eventsStreamKey: string
 
   constructor(options: {
     name: string
     createRedis: () => Redis
     produceEvents?: boolean
+    useDLQ?: boolean
     telemetryConfig?: TelemetryConfig
   }) {
     this.name = options.name
     this.createRedis = options.createRedis
     this.produceEvents = options.produceEvents ?? false
+    this.useDLQ = options.useDLQ ?? true
     this.redis = this.createRedis()
     this.telemetry = new RedisStreamTelemetry({
       streamName: this.name,
@@ -56,6 +61,10 @@ export class Stream<T extends Json> {
       ...(options.telemetryConfig ?? {})
     })
     this.streamKey = `stream:${this.name}`
+    this.dlqStreamKey = `dlq:${this.name}`
+    this.eventsStreamKey = `events:${this.name}`
+  }
+
   async sendStreamTelemetry() {
     /**
      * Collect the stream length, consumer groups info, DLQ length, and send telemetry
@@ -167,8 +176,22 @@ export class Stream<T extends Json> {
 
   private createEventStreamImpl() {
     return new Stream<StreamEvent>({
-      name: `${this.name}:events`,
+      name: this.eventsStreamKey,
       createRedis: this.createRedis,
+      produceEvents: false,
+      useDLQ: false
+    })
+  }
+
+  createDeadLetterQueueStream = memoize(
+    this.createDeadLetterQueueStreamImpl.bind(this)
+  )
+
+  private createDeadLetterQueueStreamImpl() {
+    return new Stream<T>({
+      name: this.dlqStreamKey,
+      createRedis: this.createRedis,
+      useDLQ: false,
       produceEvents: false
     })
   }
@@ -216,23 +239,19 @@ export class Stream<T extends Json> {
                 error: 'Exceeded retry limit'
               })
             }
-            // Add to dead letter queue with original data plus metadata
-            await this.redis.xadd(
-              this.dlqStreamKey,
-              '*',
-              'originalId',
-              item.id,
-              'attempts',
-              item.attempts.toString(),
-              'consumerGroup',
-              consumerGroup,
-              'consumerId',
-              consumerId,
-              'timestamp',
-              Date.now().toString(),
-              'data',
-              JSON.stringify(item.data)
-            )
+
+            if (this.useDLQ) {
+              this.createDeadLetterQueueStream().add({
+                ...item.data,
+                _dlqMetadata: {
+                  originalId: item.id,
+                  attempts: item.attempts,
+                  consumerGroup,
+                  consumerId,
+                  timestamp: Date.now()
+                }
+              })
+            }
           } catch (error) {
             // If we can't add to DLQ, log error but still acknowledge to prevent infinite loop
             console.error(
