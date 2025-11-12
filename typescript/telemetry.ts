@@ -40,6 +40,12 @@ export class RedisStreamTelemetry {
   private processingDurationHistogram!: Histogram
   private batchSizeHistogram!: Histogram
   private pendingMessagesGauge!: Gauge
+  private pendingGauge!: Gauge
+  private entriesReadCounter!: Counter
+  private lagGauge!: Gauge
+  private streamLengthGauge!: Gauge
+  private entriesAddedCounter!: Counter
+  private consumerGroupsGauge!: Gauge
 
   constructor(config: TelemetryConfig) {
     this.config = { ...defaults, ...config }
@@ -98,6 +104,51 @@ export class RedisStreamTelemetry {
         unit: '1'
       }
     )
+
+    // Gauge for pending messages per consumer group
+    this.pendingGauge = this.meter.createGauge('redis_stream_pending', {
+      description: 'Number of pending messages for a consumer group',
+      unit: '1'
+    })
+
+    // Counter for entries read
+    this.entriesReadCounter = this.meter.createCounter(
+      'redis_stream_entries_read_total',
+      {
+        description: 'Total number of entries read from the stream',
+        unit: '1'
+      }
+    )
+
+    // Gauge for consumer group lag
+    this.lagGauge = this.meter.createGauge('redis_stream_lag', {
+      description: 'Lag of consumer group behind the stream',
+      unit: '1'
+    })
+
+    // Gauge for stream length (XLEN)
+    this.streamLengthGauge = this.meter.createGauge('redis_stream_length', {
+      description: 'Current length of the stream (XLEN)',
+      unit: '1'
+    })
+
+    // Counter for entries added to stream
+    this.entriesAddedCounter = this.meter.createCounter(
+      'redis_stream_entries_added_total',
+      {
+        description: 'Total number of entries added to the stream',
+        unit: '1'
+      }
+    )
+
+    // Gauge for number of consumer groups
+    this.consumerGroupsGauge = this.meter.createGauge(
+      'redis_stream_consumer_groups_total',
+      {
+        description: 'Total number of consumer groups for the stream',
+        unit: '1'
+      }
+    )
   }
 
   private initializeNoOpMetrics() {
@@ -109,6 +160,12 @@ export class RedisStreamTelemetry {
     this.processingDurationHistogram = noOpHistogram
     this.batchSizeHistogram = noOpHistogram
     this.pendingMessagesGauge = noOpGauge
+    this.pendingGauge = noOpGauge
+    this.entriesReadCounter = noOpCounter
+    this.lagGauge = noOpGauge
+    this.streamLengthGauge = noOpGauge
+    this.entriesAddedCounter = noOpCounter
+    this.consumerGroupsGauge = noOpGauge
   }
 
   // Tracing methods
@@ -150,10 +207,49 @@ export class RedisStreamTelemetry {
     })
   }
 
-  recordPendingMessages(count: number) {
+  recordPendingMessages(count: number, consumerGroup: string) {
     this.pendingMessagesGauge.record(count, {
       stream_name: this.config.streamName,
-      consumer_group: this.config.consumerGroup
+      consumer_group: consumerGroup
+    })
+  }
+
+  recordPending(count: number, consumerGroup: string) {
+    this.pendingGauge.record(count, {
+      stream_name: this.config.streamName,
+      consumer_group: consumerGroup
+    })
+  }
+
+  recordEntriesRead(count: number, consumerGroup: string) {
+    this.entriesReadCounter.add(count, {
+      stream_name: this.config.streamName,
+      consumer_group: consumerGroup
+    })
+  }
+
+  recordLag(lag: number, consumerGroup: string) {
+    this.lagGauge.record(lag, {
+      stream_name: this.config.streamName,
+      consumer_group: consumerGroup
+    })
+  }
+
+  recordStreamLength(length: number) {
+    this.streamLengthGauge.record(length, {
+      stream_name: this.config.streamName
+    })
+  }
+
+  recordEntriesAdded(count: number) {
+    this.entriesAddedCounter.add(count, {
+      stream_name: this.config.streamName
+    })
+  }
+
+  recordConsumerGroups(count: number) {
+    this.consumerGroupsGauge.record(count, {
+      stream_name: this.config.streamName
     })
   }
 

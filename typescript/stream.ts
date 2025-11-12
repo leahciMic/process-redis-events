@@ -56,7 +56,43 @@ export class Stream<T extends Json> {
       ...(options.telemetryConfig ?? {})
     })
     this.streamKey = `stream:${this.name}`
-    this.dlqStreamKey = `stream:dlq:${this.name}`
+  async sendStreamTelemetry() {
+    /**
+     * Collect the stream length, consumer groups info, DLQ length, and send telemetry
+     */
+    if (this.name.startsWith('dlq:') || this.name.startsWith('events:')) {
+      // Don't send telemetry for DLQ or events streams, the parent stream will handle it
+      return
+    }
+
+    try {
+      const streamLength = await this.getStreamLength()
+      this.telemetry.recordStreamLength(streamLength ?? 0)
+    } catch (error) {
+      console.error(error, 'Error getting stream length for telemetry')
+    }
+
+    try {
+      const streamInfo = await this.getStreamInfo()
+      this.telemetry.recordEntriesAdded(streamInfo?.entriesAdded ?? 0)
+    } catch (error) {
+      console.error(error, 'Error getting stream info for telemetry')
+    }
+
+    try {
+      const consumerGroupsInfo = await this.getConsumerGroupsInfo()
+
+      for (const groupInfo of consumerGroupsInfo) {
+        this.telemetry.recordPendingMessages(groupInfo.pending, groupInfo.name)
+        this.telemetry.recordEntriesRead(groupInfo.entriesRead, groupInfo.name)
+        this.telemetry.recordLag(groupInfo.lag, groupInfo.name)
+      }
+    } catch (error) {
+      console.error(error, 'Error getting consumer groups info for telemetry')
+    }
+
+    await this.createDeadLetterQueueStream().sendStreamTelemetry()
+    await this.createEventStream().sendStreamTelemetry()
   }
 
   public async getStreamLength() {
