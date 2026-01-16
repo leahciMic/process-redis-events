@@ -759,16 +759,40 @@ class TestStream:
         assert retry_call_count > 0, "should_retry should have been called on reclaim"
 
         # Check that message was moved to DLQ
-        dlq_length = await stream.redis.xlen(f"stream:dlq:{stream.name}")
+        dlq_stream = stream.create_dead_letter_queue_stream()
+        dlq_length = await stream.redis.xlen(dlq_stream.stream_key)
         assert dlq_length > 0, "Message should have been moved to DLQ"
 
         # Verify DLQ content
-        dlq_entries = await stream.redis.xread({f"stream:dlq:{stream.name}": "0-0"})
+        dlq_entries = await stream.redis.xread({dlq_stream.stream_key: "0-0"})
         assert len(dlq_entries) > 0, "DLQ should contain entries"
 
         dlq_data = dlq_entries[0][1][0][1]  # [stream][entries][first_entry][fields]
-        assert b"originalId" in dlq_data, "DLQ entry should have originalId"
-        assert b"attempts" in dlq_data, "DLQ entry should have attempts"
+        assert b"data" in dlq_data, "DLQ entry should have data field"
+
+        # Parse the JSON data
+        import json
+
+        data_json = json.loads(dlq_data[b"data"].decode())
+        assert "_dlqMetadata" in data_json, "DLQ entry should have _dlqMetadata"
+        assert (
+            "originalId" in data_json["_dlqMetadata"]
+        ), "DLQ metadata should have originalId"
+        assert (
+            "attempts" in data_json["_dlqMetadata"]
+        ), "DLQ metadata should have attempts"
+        assert (
+            "consumerGroup" in data_json["_dlqMetadata"]
+        ), "DLQ metadata should have consumerGroup"
+        assert (
+            "consumerId" in data_json["_dlqMetadata"]
+        ), "DLQ metadata should have consumerId"
+        assert (
+            "timestamp" in data_json["_dlqMetadata"]
+        ), "DLQ metadata should have timestamp"
+        assert (
+            data_json["foo"] == "should-go-to-dlq"
+        ), "Original data should be preserved"
 
         # Stop processing
         shutdown_event.set()

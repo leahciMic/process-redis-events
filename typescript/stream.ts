@@ -103,7 +103,14 @@ export class Stream<T extends Record<string, unknown>> {
   }
 
   public async getStreamLength() {
-    return await this.redis.xlen(this.streamKey)
+    try {
+      return await this.redis.xlen(this.streamKey)
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('no such key')) {
+        return 0
+      }
+      throw err
+    }
   }
 
   public async getStreamInfo() {
@@ -119,11 +126,7 @@ export class Stream<T extends Record<string, unknown>> {
       ) {
         return null // Stream does not exist
       }
-      console.error(
-        `Error fetching info for stream ${this.streamKey}:`,
-        infoErr
-      )
-      return null
+      throw infoErr
     }
 
     const obj: Record<string, unknown> = Object.fromEntries(chunk(info, 2))
@@ -148,11 +151,11 @@ export class Stream<T extends Record<string, unknown>> {
       >
     )
     if (groupsReplyErr) {
-      console.error(
-        `Error fetching consumer groups for stream ${this.streamKey}:`,
-        groupsReplyErr
-      )
-      return []
+      if (groupsReplyErr.message.includes('no such key')) {
+        return []
+      }
+
+      throw groupsReplyErr
     }
 
     const parsed = groupsReply.map((entry) => {

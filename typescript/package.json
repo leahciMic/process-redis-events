@@ -1,6 +1,6 @@
 {
   "name": "process-redis-events",
-  "version": "5.0.5",
+  "version": "5.0.6",
   "description": "A TypeScript library for processing Redis Stream events with consumer groups.",
   "type": "module",
   "files": [

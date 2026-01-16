@@ -209,31 +209,10 @@ class Stream(Generic[T]):
             return
 
         try:
-            stream_length = await self.get_stream_length()
-            self.telemetry.record_stream_length(stream_length)
-        except Exception as error:
-            print(f"Error getting stream length for telemetry: {error}")
-
-        try:
-            stream_info = await self.get_stream_info()
-            if stream_info and stream_info.entries_added is not None:
-                self.telemetry.record_entries_added(stream_info.entries_added)
-        except Exception as error:
-            print(f"Error getting stream info for telemetry: {error}")
-
-        try:
             consumer_groups_info = await self.get_consumer_groups_info()
 
             for group_info in consumer_groups_info:
-                self.telemetry.record_pending_messages(
-                    group_info.pending, group_info.name
-                )
-                if group_info.entries_read is not None:
-                    self.telemetry.record_entries_read(
-                        group_info.entries_read, group_info.name
-                    )
-                if group_info.lag is not None:
-                    self.telemetry.record_lag(group_info.lag, group_info.name)
+                self.telemetry.record_pending_messages(group_info.pending)
         except Exception as error:
             print(f"Error getting consumer groups info for telemetry: {error}")
 
@@ -398,8 +377,8 @@ class Stream(Generic[T]):
 
                     if self.use_dlq:
                         # Add to DLQ with metadata embedded in the data
-                        dlq_data = {
-                            **item.data,  # type: ignore[misc]
+                        dlq_data: dict[str, Any] = {
+                            **item.data,  # type: ignore[dict-item]
                             "_dlqMetadata": {
                                 "originalId": item.id,
                                 "attempts": item.attempts,
@@ -591,7 +570,7 @@ class Stream(Generic[T]):
                 await asyncio.gather(*active_tasks, return_exceptions=True)
 
             await heartbeat_manager.stop()
-            await stream_redis.close()
+            await stream_redis.aclose()
 
     async def _process_item(
         self,

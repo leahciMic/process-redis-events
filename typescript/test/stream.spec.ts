@@ -231,7 +231,7 @@ describe('Stream information (without processing)', () => {
   it('can get stream length', async () => {
     await stream.add({ foo: 'one' })
     await stream.add({ foo: 'two' })
-    
+
     // Create consumer group for the test
     const abortController = new AbortController()
     stream.process(
@@ -246,23 +246,23 @@ describe('Stream information (without processing)', () => {
         // Empty callback, we just need the group created
       }
     )
-    
+
     // Wait for group creation
     await new Promise((resolve) => setTimeout(resolve, 100))
-    
+
     expect(await stream.getStreamInfo()).toEqual({
       entriesAdded: 2,
       groups: 1,
       length: 2
     })
-    
+
     abortController.abort()
   })
 
   it('can get pending length', async () => {
     const abortController = new AbortController()
     const deferred = pDefer()
-    
+
     // Start processing with blocked callback
     stream.process(
       {
@@ -276,10 +276,10 @@ describe('Stream information (without processing)', () => {
         await deferred.promise
       }
     )
-    
+
     // Wait for group creation
     await new Promise((resolve) => setTimeout(resolve, 50))
-    
+
     await stream.add({ foo: 'one' })
     await stream.add({ foo: 'two' })
 
@@ -295,12 +295,12 @@ describe('Stream information (without processing)', () => {
         consumers: 1
       }
     ])
-    
+
     deferred.resolve()
-    
+
     // Wait for processing to complete
     await new Promise((resolve) => setTimeout(resolve, 100))
-    
+
     expect(await stream.getConsumerGroupsInfo()).toEqual([
       {
         name: 'test-group',
@@ -310,7 +310,7 @@ describe('Stream information (without processing)', () => {
         consumers: 1
       }
     ])
-    
+
     abortController.abort()
   })
 })
