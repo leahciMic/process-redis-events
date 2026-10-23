@@ -8,7 +8,7 @@ import type { StreamEvent } from './lib/StreamEvent.js'
 import { HeartbeatManager } from './lib/HeartbeatManager.js'
 import { nanoid } from 'nanoid'
 import { createGroup } from './lib/createGroup.js'
-import { getEntries } from './lib/getEntries.js'
+import { getEntries, type RawEntry } from './lib/getEntries.js'
 import pQueue from 'p-queue'
 import z from 'zod'
 import { chunk } from './lib/chunk.js'
@@ -216,60 +216,86 @@ export class Stream<T extends Record<string, unknown>> {
     return { id }
   }
 
+  /**
+   * Moves the items that `shouldRetry` rejects to the dead letter queue (when
+   * enabled) and acks them; returns the rest. An item is only acked once its
+   * DLQ write succeeded: if that fails it stays pending and is retried after
+   * the lease.
+   */
   private async checkRetry(
     items: QueueItem<T>[],
     shouldRetry: (attempts: number, data: T) => boolean | undefined,
     consumerGroup: string,
-    consumerId: string
+    consumerId: string,
+    release: (id: string) => void
   ): Promise<QueueItem<T>[]> {
-    return await Promise.all(
+    const kept = await Promise.all(
       items.map(async (item) => {
-        if (
-          shouldRetry &&
-          item.attempts > 0 &&
-          !shouldRetry(item.attempts, item.data)
-        ) {
-          // Message exceeded retry limit - move to dead letter queue
-
-          try {
-            if (this.produceEvents) {
-              const eventStream = this.createEventStream()
-              await eventStream.add({
-                id: item.id,
-                type: 'failed',
-                error: 'Exceeded retry limit'
-              })
-            }
-
-            if (this.useDLQ) {
-              this.createDeadLetterQueueStream().add({
-                ...item.data,
-                _dlqMetadata: {
-                  originalId: item.id,
-                  attempts: item.attempts,
-                  consumerGroup,
-                  consumerId,
-                  timestamp: Date.now()
-                }
-              })
-            }
-          } catch (error) {
-            // If we can't add to DLQ, log error but still acknowledge to prevent infinite loop
-            console.error(
-              `Failed to add message to dead letter queue ${this.dlqStreamKey}:`,
-              error
-            )
-          } finally {
-            await this.redis.xack(this.streamKey, consumerGroup, item.id)
-          }
-
-          return null // Filter out this item
+        let retry: boolean | undefined = true
+        try {
+          retry = item.attempts === 0 || shouldRetry(item.attempts, item.data)
+        } catch (error) {
+          console.error(
+            `shouldRetry threw for message ${item.id} in ${this.streamKey}; retrying it:`,
+            error
+          )
         }
-        return item
+        if (retry) return item
+
+        // Message exceeded retry limit - move to dead letter queue
+        try {
+          await this.moveToDeadLetterQueue(item.id, consumerGroup, () =>
+            this.useDLQ
+              ? this.createDeadLetterQueueStream().add({
+                  ...item.data,
+                  _dlqMetadata: {
+                    originalId: item.id,
+                    attempts: item.attempts,
+                    consumerGroup,
+                    consumerId,
+                    timestamp: Date.now()
+                  }
+                })
+              : undefined
+          )
+          await this.addEventSafely({
+            id: item.id,
+            type: 'failed',
+            error: 'Exceeded retry limit'
+          })
+        } catch (error) {
+          // Leave it pending: it's reclaimed and checked again after the lease.
+          console.error(
+            `Failed to move message ${item.id} to dead letter queue ${this.dlqStreamKey}; it stays pending and will be retried:`,
+            error
+          )
+        } finally {
+          release(item.id)
+        }
+        return null // Filter out this item
       })
-    ).then((items) =>
-      items.filter((item): item is QueueItem<T> => item !== null)
     )
+    return kept.filter((item): item is QueueItem<T> => item !== null)
+  }
+
+  /** Writes to the DLQ (if `write` does anything), then acks the message. */
+  private async moveToDeadLetterQueue(
+    id: string,
+    consumerGroup: string,
+    write: () => Promise<unknown> | undefined
+  ) {
+    await write()
+    await this.redis.xack(this.streamKey, consumerGroup, id)
+  }
+
+  /** Event messages are best-effort: a failure is logged, never thrown. */
+  private async addEventSafely(event: StreamEvent) {
+    if (!this.produceEvents) return
+    try {
+      await this.createEventStream().add(event)
+    } catch (error) {
+      console.error(`Failed to add event to ${this.eventsStreamKey}:`, error)
+    }
   }
 
   async process(
@@ -283,6 +309,7 @@ export class Stream<T extends Record<string, unknown>> {
       shouldRetry?: (attempt: number, entry: T) => boolean
       concurrency?: number
       leaseMs?: number
+      onError?: (error: unknown, queueItem: QueueItem<T>) => void
     },
     callback: (queueItem: QueueItem<T>) => Promise<void>
   ): Promise<void>
@@ -298,10 +325,23 @@ export class Stream<T extends Record<string, unknown>> {
       shouldRetry?: (attempt: number, entry: T) => boolean
       concurrency?: number
       leaseMs?: number
+      onError?: (error: unknown, queueItem: QueueItem<R>) => void
     },
     callback: (queueItem: QueueItem<R>) => Promise<void>
   ): Promise<void>
 
+  /**
+   * Processes the stream until `signal` aborts. On abort it stops reading,
+   * waits for the callbacks in flight to finish (and ack), then closes its
+   * Redis connections and resolves.
+   *
+   * `attempts` on a queue item (and the first argument of `shouldRetry`) is
+   * the number of earlier deliveries: 0 on the first delivery, 1 on the first
+   * retry. `shouldRetry` isn't called on the first delivery.
+   *
+   * A callback that throws is reported to `onError` (default: console.error)
+   * and the message is retried after `leaseMs`.
+   */
   async process<R>(
     {
       consumerGroup,
@@ -313,7 +353,13 @@ export class Stream<T extends Record<string, unknown>> {
       concurrency = 10,
       map,
       /** Lease duration for processing messages, leases are auto-extended */
-      leaseMs = 30_000
+      leaseMs = 30_000,
+      onError = (error, queueItem) => {
+        console.error(
+          `Error processing message ${queueItem.id} from ${this.streamKey}:`,
+          error
+        )
+      }
     }: {
       signal: AbortSignal
       consumerGroup: string
@@ -324,6 +370,7 @@ export class Stream<T extends Record<string, unknown>> {
       shouldRetry?: (attempt: number, entry: T) => boolean
       concurrency?: number
       leaseMs?: number
+      onError?: (error: unknown, queueItem: QueueItem<any>) => void
     },
     callback: (queueItem: QueueItem<R>) => Promise<void>
   ) {
@@ -333,6 +380,7 @@ export class Stream<T extends Record<string, unknown>> {
     const heartbeat = Math.round(leaseMs / 2)
     const xclaimBlockTimeout = Math.max(leaseMs - 1_000, 100)
     const reclaimAfter = leaseMs + 100
+    const cursor = { value: '0-0' }
 
     const telemetry = this.telemetry.child({
       consumerGroup,
@@ -346,13 +394,14 @@ export class Stream<T extends Record<string, unknown>> {
       consumerId,
       heartbeat
     )
+    const release = (id: string) => heartbeatManager.remove(id)
 
     const eventStream = this.produceEvents ? this.createEventStream() : null
 
-    signal.addEventListener('abort', async () => {
-      await streamRedis.quit()
-      await redis.quit()
-    })
+    // Interrupt a blocking read right away; entries it may have just read
+    // stay pending and are reclaimed after the lease.
+    const onAbort = () => streamRedis.disconnect()
+    signal.addEventListener('abort', onAbort, { once: true })
 
     function createQueueItem({
       id,
@@ -383,77 +432,217 @@ export class Stream<T extends Record<string, unknown>> {
       }
     }
 
-    await createGroup(streamRedis, this.streamKey, consumerGroup, startFrom)
+    const safeOnError = (error: unknown, item: QueueItem<R>) => {
+      try {
+        onError(error, item)
+      } catch (onErrorError) {
+        console.error('onError threw:', onErrorError)
+      }
+    }
 
-    while (!signal.aborted) {
-      await queue.onSizeLessThan(concurrency)
-
-      const entries = await getEntries({
-        redis: streamRedis,
-        stream: this.streamKey,
-        consumerGroup,
-        consumerId,
-        blockFor: xclaimBlockTimeout,
-        batchSize,
-        reclaimAfter,
-        signal
-      })
-
-      const queueItems = await this.checkRetry(
-        entries?.map(createQueueItem) ?? [],
-        shouldRetry,
-        consumerGroup,
-        consumerId
-      )
-
-      if (signal.aborted) {
+    const processItem = async (item: QueueItem<R>) => {
+      const timer = telemetry.startTimer()
+      try {
+        await eventStream?.add({ id: item.id, type: 'started' })
+        await callback(item)
+      } catch (e) {
+        // Not acked: the message is retried after the lease.
+        heartbeatManager.remove(item.id)
+        telemetry.recordMessagesProcessed(1, { status: 'error' })
+        safeOnError(e, item)
+        await this.addEventSafely({
+          id: item.id,
+          type: 'failed',
+          error: (e as Error)?.message ?? String(e)
+        })
         return
       }
-
+      telemetry.recordMessagesProcessed(1, { status: 'success' })
+      telemetry.recordProcessingDuration(timer())
       try {
-        const mapped = map
-          ? await map(queueItems.map((x) => x.data))
-          : queueItems.map((x) => x.data)
-
-        assert(
-          mapped.length === queueItems.length,
-          'Map function returned incorrect number of items'
+        await redis.xack(this.streamKey, consumerGroup, item.id)
+      } catch (e) {
+        // The message is processed again after the lease.
+        console.error(
+          `Failed to ack message ${item.id} in ${this.streamKey}:`,
+          e
         )
-
-        const mappedQueueItems: QueueItem<R>[] = mapped.map((data, index) => ({
-          ...queueItems[index]!,
-          data
-        }))
-
-        telemetry.recordBatchSize(mappedQueueItems.length)
-
-        queue.addAll(
-          mappedQueueItems.map((item) => async () => {
-            const timer = telemetry.startTimer()
-            try {
-              await eventStream?.add({ id: item.id, type: 'started' })
-              await callback(item)
-              telemetry.recordMessagesProcessed(1, { status: 'success' })
-              const duration = timer()
-              telemetry.recordProcessingDuration(duration)
-              await redis.xack(this.streamKey, consumerGroup, item.id)
-              await eventStream?.add({ id: item.id, type: 'completed' })
-            } catch (e) {
-              await eventStream?.add({
-                id: item.id,
-                type: 'failed',
-                error: (e as Error).message
-              })
-              telemetry.recordMessagesProcessed(1, { status: 'error' })
-            } finally {
-              heartbeatManager.remove(item.id)
-            }
-          })
-          // { signal }
-        )
-      } catch (error) {
-        console.error('Error processing entries:', error)
+        return
+      } finally {
+        heartbeatManager.remove(item.id)
       }
+      await this.addEventSafely({ id: item.id, type: 'completed' })
+    }
+
+    const deadLetterUnparseable = async (
+      entry: Extract<RawEntry, { parseError: Error }>
+    ) => {
+      try {
+        await this.moveToDeadLetterQueue(entry.id, consumerGroup, () => {
+          if (!this.useDLQ) {
+            console.error(
+              `Dropping message ${entry.id} from ${this.streamKey}: it can't be parsed:`,
+              entry.parseError
+            )
+            return undefined
+          }
+          console.error(
+            `Moving message ${entry.id} from ${this.streamKey} to ${this.dlqStreamKey}: it can't be parsed:`,
+            entry.parseError
+          )
+          return this.createDeadLetterQueueStream().add({
+            _raw: entry.fields,
+            _dlqMetadata: {
+              originalId: entry.id,
+              attempts: entry.attempts,
+              consumerGroup,
+              consumerId,
+              timestamp: Date.now(),
+              error: entry.parseError.message
+            }
+          } as unknown as T)
+        })
+      } catch (error) {
+        console.error(
+          `Failed to move unparseable message ${entry.id} to ${this.dlqStreamKey}; it stays pending and will be retried:`,
+          error
+        )
+      }
+    }
+
+    let backoffMs = 0
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const timeout = setTimeout(done, ms)
+        function done() {
+          clearTimeout(timeout)
+          signal.removeEventListener('abort', done)
+          resolve()
+        }
+        signal.addEventListener('abort', done, { once: true })
+      })
+
+    try {
+      while (!signal.aborted) {
+        try {
+          await createGroup(streamRedis, this.streamKey, consumerGroup, startFrom)
+          break
+        } catch (error) {
+          if (signal.aborted) break
+          backoffMs = Math.min(Math.max(backoffMs * 2, 100), 5_000)
+          console.error(
+            `Error creating consumer group ${consumerGroup} on ${this.streamKey}, retrying in ${backoffMs}ms:`,
+            error
+          )
+          await sleep(backoffMs)
+        }
+      }
+      backoffMs = 0
+
+      while (!signal.aborted) {
+        let batch: QueueItem<T>[] = []
+        try {
+          await queue.onSizeLessThan(concurrency)
+          if (signal.aborted) break
+
+          const entries = await getEntries({
+            redis: streamRedis,
+            stream: this.streamKey,
+            consumerGroup,
+            consumerId,
+            blockFor: xclaimBlockTimeout,
+            batchSize,
+            reclaimAfter,
+            signal,
+            cursor
+          })
+          backoffMs = 0
+
+          if (signal.aborted) {
+            // Not started: they stay pending and are reclaimed after the lease.
+            break
+          }
+
+          const parsed: QueueItem<T>[] = []
+          for (const entry of entries) {
+            if (entry.parseError) {
+              await deadLetterUnparseable(entry)
+            } else {
+              parsed.push(
+                createQueueItem({
+                  id: entry.id,
+                  data: entry.data as T,
+                  attempts: entry.attempts
+                })
+              )
+            }
+          }
+          batch = parsed
+
+          batch = await this.checkRetry(
+            batch,
+            shouldRetry,
+            consumerGroup,
+            consumerId,
+            release
+          )
+
+          if (batch.length === 0) continue
+
+          const mapped = map
+            ? await map(batch.map((x) => x.data))
+            : batch.map((x) => x.data)
+
+          assert(
+            mapped.length === batch.length,
+            'Map function returned incorrect number of items'
+          )
+
+          const mappedQueueItems: QueueItem<R>[] = mapped.map(
+            (data, index) => ({
+              ...batch[index]!,
+              data
+            })
+          )
+          batch = []
+
+          telemetry.recordBatchSize(mappedQueueItems.length)
+
+          for (const item of mappedQueueItems) {
+            void queue.add(() => processItem(item))
+          }
+        } catch (error) {
+          // A batch that wasn't handed to the queue (e.g. map threw) is
+          // retried after the lease.
+          for (const item of batch) heartbeatManager.remove(item.id)
+          if (batch.length > 0) {
+            telemetry.recordMessagesProcessed(batch.length, { status: 'error' })
+          }
+          if (signal.aborted) break
+
+          if (error instanceof Error && /NOGROUP/.test(error.message)) {
+            // The stream or group was deleted: recreate it, as a restart would.
+            await createGroup(
+              streamRedis,
+              this.streamKey,
+              consumerGroup,
+              startFrom
+            ).catch(() => {})
+          }
+          backoffMs = Math.min(Math.max(backoffMs * 2, 100), 5_000)
+          console.error(
+            `Error processing entries from ${this.streamKey}, retrying in ${backoffMs}ms:`,
+            error
+          )
+          await sleep(backoffMs)
+        }
+      }
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+      await queue.onIdle()
+      heartbeatManager.close()
+      streamRedis.disconnect()
+      await redis.quit().catch(() => {})
     }
   }
 }

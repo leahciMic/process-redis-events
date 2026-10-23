@@ -12,6 +12,11 @@ import { Redis } from 'ioredis'
 import { nanoid } from 'nanoid'
 import pDefer from 'p-defer'
 
+// Tests run against REDIS_URL (default redis://localhost:6379). Use a
+// throwaway Redis: the tests create and delete streams.
+const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379'
+const createRedis = () => new Redis(REDIS_URL)
+
 let stream: Stream<{ foo: string }>
 let mockFn: Mock<Parameters<(typeof stream)['process']>[1]>
 let shouldRetry: ReturnType<typeof vi.fn>
@@ -24,7 +29,7 @@ describe('stream', () => {
     abortController = new AbortController()
     stream = new Stream({
       name: nanoid(),
-      createRedis: () => new Redis(),
+      createRedis,
       produceEvents: true
     })
     mockFn = vi.fn()
@@ -218,7 +223,7 @@ describe('Stream information (without processing)', () => {
   beforeEach(async () => {
     stream = new Stream({
       name: nanoid(),
-      createRedis: () => new Redis(),
+      createRedis,
       produceEvents: true
     })
   })
