@@ -1,5 +1,26 @@
 import type { Redis } from 'ioredis'
 
+/**
+ * Resets the idle time of the ids still owned by this consumer and returns
+ * the ids it no longer owns (acked, or claimed by another consumer after a
+ * lease expired). A plain `XCLAIM ... IDLE 0` would take a message back from
+ * the consumer that reclaimed it, and both would then process it. Same script
+ * as the Python library's entries.HEARTBEAT_LUA.
+ */
+export const HEARTBEAT_LUA = `
+local key, group, consumer = KEYS[1], ARGV[1], ARGV[2]
+local lost = {}
+for i = 3, #ARGV do
+  local p = redis.call('XPENDING', key, group, ARGV[i], ARGV[i], 1)
+  if p[1] and p[1][2] == consumer then
+    redis.call('XCLAIM', key, group, consumer, 0, ARGV[i], 'IDLE', 0, 'JUSTID')
+  else
+    lost[#lost + 1] = ARGV[i]
+  end
+end
+return lost
+`
+
 export class HeartbeatManager {
   private intervalId: NodeJS.Timeout | null = null
   private jobIds: Set<string> = new Set()
@@ -12,7 +33,7 @@ export class HeartbeatManager {
     heartbeatIntervalMs = 15_000
   ) {
     this.intervalId = setInterval(() => {
-      this.sendHeartbeats()
+      void this.sendHeartbeats()
     }, heartbeatIntervalMs)
   }
 
@@ -24,27 +45,31 @@ export class HeartbeatManager {
     this.jobIds.clear()
   }
 
-  sendHeartbeats() {
-    if (this.jobIds.size === 0) {
-      return
+  /** Resolves with the ids in progress that this consumer no longer owns. */
+  async sendHeartbeats(): Promise<string[]> {
+    const ids = [...this.jobIds]
+    const lost: string[] = []
+    for (let start = 0; start < ids.length; start += 500) {
+      try {
+        const reply = (await this.redis.eval(
+          HEARTBEAT_LUA,
+          1,
+          this.stream,
+          this.consumerGroup,
+          this.consumerId,
+          ...ids.slice(start, start + 500)
+        )) as string[] | null
+        lost.push(...(reply ?? []))
+      } catch (err) {
+        console.error('Error sending heartbeats:', err)
+      }
     }
-
-    const pipeline = this.redis.pipeline()
-    this.jobIds.forEach((jobId) => {
-      pipeline.xclaim(
-        this.stream,
-        this.consumerGroup,
-        this.consumerId,
-        0,
-        jobId,
-        'IDLE',
-        0,
-        'JUSTID'
+    if (lost.length > 0) {
+      console.error(
+        `${lost.length} message(s) in progress on ${this.stream} were acknowledged or reclaimed by another consumer: ${lost.slice(0, 5).join(', ')}`
       )
-    })
-    pipeline.exec().catch((err) => {
-      console.error('Error sending heartbeats:', err)
-    })
+    }
+    return lost
   }
   add(jobId: string) {
     this.jobIds.add(jobId)
