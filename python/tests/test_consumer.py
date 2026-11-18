@@ -608,3 +608,9 @@ def test_a_deleted_group_is_recreated(r, stream):
     stop.set()
     t.join(5)
     assert seen[:1] == ["a"] and "b" in seen
+
+
+def test_the_default_block_fits_any_socket_timeout(r, stream):
+    c = BatchConsumer(redis.Redis.from_url(REDIS_URL, socket_timeout=3), stream, "g", "test", lambda ps: None)
+    assert c.block_ms == 2000
+    assert BatchConsumer(r, stream, "g", "test", lambda ps: None).block_ms == 5000  # socket_timeout 30

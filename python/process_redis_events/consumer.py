@@ -198,7 +198,7 @@ class BatchConsumer:
         max_wait_s: float = 30.0,
         lease_ms: int = 10 * 60 * 1000,
         max_attempts: int = 3,
-        block_ms: int = 5000,
+        block_ms: int | None = None,
         should_read: Callable[[], bool] = lambda: True,
         idle_check_s: float = 30.0,
         stop: threading.Event | None = None,
@@ -224,8 +224,11 @@ class BatchConsumer:
         self.max_wait_s = max_wait_s
         self.lease_ms = lease_ms
         self.max_attempts = max_attempts
-        self._block_ms = 0
-        self.block_ms = block_ms
+        # None: 5 s, or less when the client's socket timeout is shorter (silently; an explicit value that's too long
+        # is shortened with a warning)
+        self._block_ms = safe_block_ms(r, 5000) if block_ms is None else 0
+        if block_ms is not None:
+            self.block_ms = block_ms
         self.should_read = should_read
         self.idle_check_s = idle_check_s
         self.stop = stop or threading.Event()
