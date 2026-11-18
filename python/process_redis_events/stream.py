@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from functools import lru_cache
+import logging
 from typing import Any, Awaitable, Callable, Generic, TypeVar, overload, Protocol
 
 from redis.asyncio import Redis
@@ -10,12 +10,18 @@ from redis.asyncio import Redis
 from process_redis_events.chunk import chunk
 from process_redis_events.constants import StartFrom
 from process_redis_events.create_group import create_group
+from process_redis_events.dlq import dlq_data, dumps
+from process_redis_events.errors import backoff_delay
 from process_redis_events.get_entries import EntryData, get_entries
 from process_redis_events.heartbeat_manager import HeartbeatManager
 from process_redis_events.queue_item import QueueItem
 from process_redis_events.result_of import result_of
 from process_redis_events.stream_event import StreamEvent
+from process_redis_events.naming import consumer_name
 from process_redis_events.telemetry import RedisStreamTelemetry, TelemetryConfig
+from process_redis_events.timeouts import safe_block_ms
+
+log = logging.getLogger("process_redis_events")
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -46,10 +52,8 @@ class ProcessCallback(Protocol[T]):
 
 
 def _generate_id() -> str:
-    """Generate a unique ID."""
-    import uuid
-
-    return str(uuid.uuid4()).replace("-", "")[:21]
+    """The default consumer id: $STREAM_CONSUMER_NAME, else a random id (see naming.consumer_name)."""
+    return consumer_name()
 
 
 class StreamInfo:
@@ -79,7 +83,6 @@ class ConsumerGroupInfo:
         self.last_delivered_id = last_delivered_id
         self.entries_read = entries_read
         self.lag = lag
-        self.lag = lag
 
 
 class ProcessOptions(Generic[T, R]):
@@ -97,6 +100,7 @@ class ProcessOptions(Generic[T, R]):
         should_retry: RetryFunction | None = None,
         concurrency: int = 10,
         lease_ms: int = 30000,
+        on_error: Callable[[BaseException, QueueItem[Any]], None] | None = None,
     ):
         """Initialize processing options.
 
@@ -110,6 +114,7 @@ class ProcessOptions(Generic[T, R]):
             should_retry: Optional function to determine retry logic
             concurrency: Maximum number of concurrent processors
             lease_ms: Message lease duration in milliseconds
+            on_error: Called with the error and the item when a callback raises (default: logged)
         """
         self.signal = signal
         self.consumer_group = consumer_group
@@ -120,6 +125,7 @@ class ProcessOptions(Generic[T, R]):
         self.should_retry = should_retry or (lambda attempt, entry: True)
         self.concurrency = concurrency
         self.lease_ms = lease_ms
+        self.on_error = on_error
 
 
 def create_process_options(
@@ -133,6 +139,7 @@ def create_process_options(
     should_retry: RetryFunction | None = None,
     concurrency: int = 10,
     lease_ms: int = 30000,
+    on_error: Callable[[BaseException, QueueItem[Any]], None] | None = None,
 ) -> ProcessOptions[Any, Any]:
     """Create ProcessOptions with sensible defaults.
 
@@ -160,6 +167,7 @@ def create_process_options(
         should_retry=should_retry,
         concurrency=concurrency,
         lease_ms=lease_ms,
+        on_error=on_error,
     )
 
 
@@ -212,9 +220,11 @@ class Stream(Generic[T]):
             consumer_groups_info = await self.get_consumer_groups_info()
 
             for group_info in consumer_groups_info:
-                self.telemetry.record_pending_messages(group_info.pending)
+                self.telemetry.record_pending_messages(
+                    group_info.pending, group_info.name
+                )
         except Exception as error:
-            print(f"Error getting consumer groups info for telemetry: {error}")
+            log.warning("Error getting consumer groups info for telemetry: %s", error)
 
         await self.create_dead_letter_queue_stream().send_stream_telemetry()
         await self.create_event_stream().send_stream_telemetry()
@@ -343,9 +353,7 @@ class Stream(Generic[T]):
         Returns:
             Dictionary with the message ID
         """
-        id = await self.redis.xadd(
-            name=self.stream_key, fields={"data": json.dumps(data)}
-        )
+        id = await self.redis.xadd(name=self.stream_key, fields={"data": dumps(data)})
         assert isinstance(id, (str, bytes)), "Failed to add message to stream"
         if isinstance(id, bytes):
             id = id.decode()
@@ -357,49 +365,106 @@ class Stream(Generic[T]):
         should_retry: Callable[[int, T], bool],
         consumer_group: str,
         consumer_id: str,
+        release: Callable[[str], None],
     ) -> list[QueueItem[T]]:
-        """Check if items should be retried or moved to DLQ."""
-        filtered_items: list[QueueItem[T]] = []
-
+        """Moves the items that ``should_retry`` rejects to the dead letter queue (when enabled) and acks them;
+        returns the rest. An item is acked only once its DLQ entry is written: if that fails it stays pending and
+        is checked again after the lease."""
+        kept: list[QueueItem[T]] = []
         for item in items:
-            if item.attempts > 0 and not should_retry(item.attempts, item.data):
-                # Move to dead letter queue
-                try:
-                    if self.produce_events:
-                        event_stream = self.create_event_stream()
-                        await event_stream.add(
-                            {
-                                "id": item.id,
-                                "type": "failed",
-                                "error": "Exceeded retry limit",
-                            }
-                        )
+            retry = True
+            try:
+                retry = item.attempts == 0 or bool(
+                    should_retry(item.attempts, item.data)
+                )
+            except Exception as error:
+                log.error(
+                    "should_retry raised for message %s in %s; retrying it: %r",
+                    item.id,
+                    self.stream_key,
+                    error,
+                )
+            if retry:
+                kept.append(item)
+                continue
+            try:
+                await self._move_to_dlq(
+                    item.id,
+                    consumer_group,
+                    dlq_data(
+                        item.data,
+                        original_id=item.id,
+                        attempts=item.attempts,
+                        consumer_group=consumer_group,
+                        consumer_id=consumer_id,
+                    ),
+                )
+                await self._add_event_safely(
+                    {"id": item.id, "type": "failed", "error": "Exceeded retry limit"}
+                )
+            except Exception as error:
+                log.error(
+                    "Failed to move message %s to %s; it stays pending and will be retried: %r",
+                    item.id,
+                    self.dlq_stream_key,
+                    error,
+                )
+            finally:
+                release(item.id)
+        return kept
 
-                    if self.use_dlq:
-                        # Add to DLQ with metadata embedded in the data
-                        dlq_data: dict[str, Any] = {
-                            **item.data,  # type: ignore[dict-item]
-                            "_dlqMetadata": {
-                                "originalId": item.id,
-                                "attempts": item.attempts,
-                                "consumerGroup": consumer_group,
-                                "consumerId": consumer_id,
-                                "timestamp": int(
-                                    asyncio.get_event_loop().time() * 1000
-                                ),
-                            },
-                        }
-                        await self.create_dead_letter_queue_stream().add(dlq_data)  # type: ignore[arg-type]
-                except Exception as error:
-                    print(
-                        f"Failed to add message to dead letter queue {self.dlq_stream_key}: {error}"
-                    )
-                finally:
-                    await self.redis.xack(self.stream_key, consumer_group, item.id)  # type: ignore[no-untyped-call]
-            else:
-                filtered_items.append(item)
+    async def _move_to_dlq(self, id: str, consumer_group: str, data: str) -> None:
+        """Writes the DLQ entry (when the DLQ is enabled), then acks the message."""
+        if self.use_dlq:
+            await self.redis.xadd(
+                name=f"stream:{self.dlq_stream_key}", fields={"data": data}
+            )
+        await self.redis.xack(self.stream_key, consumer_group, id)  # type: ignore[no-untyped-call]
 
-        return filtered_items
+    async def _add_event_safely(self, event: dict[str, Any]) -> None:
+        """Event messages are best-effort: a failure is logged, never raised."""
+        if not self.produce_events:
+            return
+        try:
+            await self.create_event_stream().add(event)  # type: ignore[arg-type]
+        except Exception as error:
+            log.error("Failed to add event to %s: %r", self.events_stream_key, error)
+
+    async def _dead_letter_unparseable(
+        self, entry: EntryData, consumer_group: str, consumer_id: str
+    ) -> None:
+        reason = "not JSON" if entry.parse_error is not None else "not a JSON object"
+        log.error(
+            "Moving message %s from %s to the dead letter queue: %s",
+            entry.id,
+            self.stream_key,
+            reason,
+        )
+        try:
+            await self._move_to_dlq(
+                entry.id,
+                consumer_group,
+                dlq_data(
+                    None,
+                    original_id=entry.id,
+                    attempts=entry.attempts,
+                    consumer_group=consumer_group,
+                    consumer_id=consumer_id,
+                    raw_fields=entry.fields,
+                    error=(
+                        str(entry.parse_error)
+                        if entry.parse_error is not None
+                        else reason
+                    ),
+                ),
+            )
+        except Exception as error:
+            log.error(
+                "Failed to move unparseable message %s to %s; it stays pending and will be retried: %r",
+                entry.id,
+                self.dlq_stream_key,
+                error,
+            )
 
     @overload
     async def process(
@@ -437,14 +502,17 @@ class Stream(Generic[T]):
         concurrency = options.concurrency
         lease_ms = options.lease_ms
 
+        on_error = options.on_error
+
         stream_redis = self.create_redis()
         redis = self.redis
 
-        # Create semaphore for concurrency control
-        semaphore = asyncio.Semaphore(concurrency)
         heartbeat = round(lease_ms / 2)
-        xclaim_block_timeout = max(lease_ms - 1000, 100)
+        # Shorter than the lease, and than the client's socket timeout (redis-py 8 defaults it to 5 s): a blocking
+        # read as long as the socket timeout fails with "Timeout reading from socket".
+        xclaim_block_timeout = safe_block_ms(stream_redis, max(lease_ms - 1000, 100))
         reclaim_after = lease_ms + 100
+        cursor = {"value": "0-0"}
 
         telemetry = self.telemetry.child(
             consumer_group=consumer_group,
@@ -458,7 +526,7 @@ class Stream(Generic[T]):
 
         event_stream = self.create_event_stream() if self.produce_events else None
 
-        async def create_queue_item(entry: EntryData) -> QueueItem[T]:
+        def create_queue_item(entry: EntryData) -> QueueItem[T]:
             """Create a queue item from an entry."""
             heartbeat_manager.add(entry.id)
 
@@ -482,7 +550,31 @@ class Stream(Generic[T]):
                 report_progress=report_progress,
             )
 
-        await create_group(stream_redis, self.stream_key, consumer_group, start_from)
+        async def sleep(seconds: float) -> None:
+            try:
+                await asyncio.wait_for(signal.wait(), timeout=seconds)
+            except asyncio.TimeoutError:
+                pass
+
+        failures = 0
+        while not signal.is_set():
+            try:
+                await create_group(
+                    stream_redis, self.stream_key, consumer_group, start_from
+                )
+                break
+            except Exception as error:
+                failures += 1
+                delay = backoff_delay(failures, cap=5.0)
+                log.error(
+                    "Error creating consumer group %s on %s, retrying in %.1fs: %r",
+                    consumer_group,
+                    self.stream_key,
+                    delay,
+                    error,
+                )
+                await sleep(delay)
+        failures = 0
 
         # Track active tasks
         active_tasks: set[asyncio.Task[None]] = set()
@@ -491,42 +583,51 @@ class Stream(Generic[T]):
             while not signal.is_set():
                 # Wait for capacity
                 while len(active_tasks) >= concurrency and not signal.is_set():
-                    done, active_tasks = await asyncio.wait(
+                    _, active_tasks = await asyncio.wait(
                         active_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.1
                     )
-                    # Handle any exceptions from completed tasks
-                    for task in done:
-                        try:
-                            await task
-                        except Exception as e:
-                            print(f"Error in processing task: {e}")
 
                 if signal.is_set():
                     break
 
-                entries = await get_entries(
-                    redis=stream_redis,
-                    stream=self.stream_key,
-                    consumer_group=consumer_group,
-                    consumer_id=consumer_id,
-                    block_for=xclaim_block_timeout,
-                    batch_size=batch_size,
-                    reclaim_after=reclaim_after,
-                    signal=signal,
-                )
-
-                if not entries:
-                    continue
-
-                queue_items = [await create_queue_item(e) for e in entries]
-                queue_items = await self._check_retry(
-                    queue_items, should_retry, consumer_group, consumer_id
-                )
-
-                if signal.is_set():
-                    break
-
+                queue_items: list[QueueItem[T]] = []
                 try:
+                    entries = await get_entries(
+                        redis=stream_redis,
+                        stream=self.stream_key,
+                        consumer_group=consumer_group,
+                        consumer_id=consumer_id,
+                        block_for=xclaim_block_timeout,
+                        batch_size=batch_size,
+                        reclaim_after=reclaim_after,
+                        signal=signal,
+                        cursor=cursor,
+                    )
+                    failures = 0
+
+                    if signal.is_set():
+                        # Not started: they stay pending and are reclaimed after the lease.
+                        break
+                    if not entries:
+                        continue
+
+                    for entry in entries:
+                        if entry.parse_error is not None:
+                            await self._dead_letter_unparseable(
+                                entry, consumer_group, consumer_id
+                            )
+                        else:
+                            queue_items.append(create_queue_item(entry))
+                    queue_items = await self._check_retry(
+                        queue_items,
+                        should_retry,
+                        consumer_group,
+                        consumer_id,
+                        heartbeat_manager.remove,
+                    )
+                    if not queue_items:
+                        continue
+
                     if map_fn:
                         mapped = await map_fn([item.data for item in queue_items])
                         assert len(mapped) == len(
@@ -543,10 +644,10 @@ class Stream(Generic[T]):
                         ]
                     else:
                         mapped_queue_items = queue_items
+                    queue_items = []
 
                     telemetry.record_batch_size(len(mapped_queue_items))
 
-                    # Create tasks for each item
                     for item in mapped_queue_items:
                         task = asyncio.create_task(
                             self._process_item(
@@ -556,16 +657,44 @@ class Stream(Generic[T]):
                                 event_stream,
                                 consumer_group,
                                 heartbeat_manager,
-                                should_retry,
+                                on_error,
                             )
                         )
                         active_tasks.add(task)
 
                 except Exception as error:
-                    print(f"Error processing entries: {error}")
+                    # A batch that wasn't handed to the tasks (e.g. map raised) is retried after the lease.
+                    for item in queue_items:
+                        heartbeat_manager.remove(item.id)
+                    if queue_items:
+                        telemetry.record_messages_processed(
+                            len(queue_items), {"status": "error"}
+                        )
+                    if signal.is_set():
+                        break
+                    if "NOGROUP" in str(error):
+                        # The stream or group was deleted: recreate it, as a restart would.
+                        try:
+                            await create_group(
+                                stream_redis,
+                                self.stream_key,
+                                consumer_group,
+                                start_from,
+                            )
+                        except Exception:
+                            pass
+                    failures += 1
+                    delay = backoff_delay(failures, cap=5.0)
+                    log.error(
+                        "Error processing entries from %s, retrying in %.1fs: %r",
+                        self.stream_key,
+                        delay,
+                        error,
+                    )
+                    await sleep(delay)
 
         finally:
-            # Wait for all active tasks to complete
+            # Wait for the callbacks in flight (and their acks)
             if active_tasks:
                 await asyncio.gather(*active_tasks, return_exceptions=True)
 
@@ -580,34 +709,44 @@ class Stream(Generic[T]):
         event_stream: "Stream[StreamEvent] | None",
         consumer_group: str,
         heartbeat_manager: HeartbeatManager,
-        should_retry: RetryFunction,
+        on_error: Callable[[BaseException, QueueItem[Any]], None] | None,
     ) -> None:
-        """Process a single item."""
+        """Process a single item. A callback that raises isn't acked: the message is delivered again after the
+        lease (or goes to the dead letter queue once should_retry says so)."""
         timer = telemetry.start_timer()
         try:
-            if event_stream:
-                await event_stream.add({"id": item.id, "type": "started"})
-
-            await callback(item)
-
-            telemetry.record_messages_processed(1, {"status": "success"})
-            duration = timer()
-            telemetry.record_processing_duration(duration)
-            await self.redis.xack(self.stream_key, consumer_group, item.id)  # type: ignore[no-untyped-call]
-
-            if event_stream:
-                await event_stream.add({"id": item.id, "type": "completed"})
-
-        except Exception as e:
-            if event_stream:
-                await event_stream.add(
+            try:
+                if event_stream:
+                    await self._add_event_safely({"id": item.id, "type": "started"})
+                await callback(item)
+            except Exception as e:
+                telemetry.record_messages_processed(1, {"status": "error"})
+                try:
+                    if on_error is not None:
+                        on_error(e, item)
+                    else:
+                        log.error(
+                            "Error processing message %s from %s: %r",
+                            item.id,
+                            self.stream_key,
+                            e,
+                        )
+                except Exception as on_error_error:
+                    log.error("on_error raised: %r", on_error_error)
+                await self._add_event_safely(
                     {"id": item.id, "type": "failed", "error": str(e)}
                 )
-            telemetry.record_messages_processed(1, {"status": "error"})
-
-            # When processing fails, simply don't acknowledge the message
-            # Redis will track attempts through its internal pending system
-            # The message will be reclaimed later and _check_retry will handle should_retry logic
-
+                return
+            telemetry.record_messages_processed(1, {"status": "success"})
+            telemetry.record_processing_duration(timer())
+            try:
+                await self.redis.xack(self.stream_key, consumer_group, item.id)  # type: ignore[no-untyped-call]
+            except Exception as e:
+                # The message is processed again after the lease.
+                log.error(
+                    "Failed to ack message %s in %s: %r", item.id, self.stream_key, e
+                )
+                return
+            await self._add_event_safely({"id": item.id, "type": "completed"})
         finally:
             heartbeat_manager.remove(item.id)
