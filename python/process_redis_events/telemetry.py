@@ -14,7 +14,7 @@ class TelemetryConfig:
     def __init__(
         self,
         enabled: bool = True,
-        version: str = "5.0.6",
+        version: str = "5.2.0",
         meter_name: str = "process-redis-events",
         tracer_name: str = "process-redis-events",
         stream_name: str = "",
@@ -79,9 +79,11 @@ class RedisStreamTelemetry:
             unit="1",
         )
 
-        # Note: Using histogram for pending messages as OpenTelemetry Python
-        # doesn't have synchronous gauge in the same way
-        self.pending_messages_gauge = self.meter.create_histogram(
+        # A synchronous gauge, as the TypeScript library's (opentelemetry-api >= 1.23); a histogram before that.
+        create_gauge = (
+            getattr(self.meter, "create_gauge", None) or self.meter.create_histogram
+        )
+        self.pending_messages_gauge = create_gauge(
             name="redis_stream_pending_messages",
             description="Number of pending messages in the stream",
             unit="1",
@@ -165,17 +167,21 @@ class RedisStreamTelemetry:
             },
         )
 
-    def record_pending_messages(self, count: int) -> None:
-        """Record the number of pending messages.
+    def record_pending_messages(
+        self, count: int, consumer_group: str | None = None
+    ) -> None:
+        """Record the number of pending messages of a consumer group (as the TypeScript library: one series per
+        group, not one series that every group overwrites).
 
         Args:
             count: Number of pending messages
+            consumer_group: The group (default: the configured one)
         """
         self.pending_messages_gauge.record(
             count,
             attributes={
                 "stream_name": self.config.stream_name,
-                "consumer_group": self.config.consumer_group,
+                "consumer_group": consumer_group or self.config.consumer_group,
             },
         )
 

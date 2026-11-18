@@ -1,6 +1,7 @@
 """Tests for the Stream class."""
 
 import asyncio
+import os
 from typing import Any, TypedDict
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +16,8 @@ from process_redis_events import (
     create_process_options,
 )
 
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+
 
 class MyData(TypedDict):
     """Test data type."""
@@ -25,7 +28,7 @@ class MyData(TypedDict):
 @pytest.fixture
 async def redis_client() -> Redis:
     """Create a Redis client for testing."""
-    client = Redis.from_url("redis://localhost")
+    client = Redis.from_url(REDIS_URL)
     yield client
     await client.aclose()
 
@@ -35,7 +38,7 @@ async def stream(redis_client: Redis) -> Stream[MyData]:
     """Create a test stream."""
     stream = Stream[MyData](
         name=f"test-stream-{asyncio.get_event_loop().time()}",
-        create_redis=lambda: Redis.from_url("redis://localhost"),
+        create_redis=lambda: Redis.from_url(REDIS_URL),
         produce_events=True,
     )
     yield stream

@@ -1,0 +1,35 @@
+{
+  "description": "The wire format of a process-redis-events 5 stream, shared by the TypeScript and Python libraries (and any producer in another language). A message to stream <name> is XADD stream:<name> * data <JSON object>, compact JSON (JSON.stringify), values strings by convention. A dead letter is XADD stream:dlq:<name> * data <the payload plus _dlqMetadata>; a payload that isn't a JSON object keeps its raw fields under _raw.",
+  "messages": [
+    {
+      "stream": "product-updated",
+      "key": "stream:product-updated",
+      "payload": { "id": "p1" },
+      "fields": { "data": "{\"id\":\"p1\"}" }
+    },
+    {
+      "stream": "update-milvus",
+      "key": "stream:update-milvus",
+      "payload": { "id": "p1", "name": "Café ✓", "textChanged": "false", "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" },
+      "fields": { "data": "{\"id\":\"p1\",\"name\":\"Café ✓\",\"textChanged\":\"false\",\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}" }
+    }
+  ],
+  "legacy": [
+    {
+      "fields": { "id": "p1", "nameChanged": "false" },
+      "payload": { "id": "p1", "nameChanged": "false" }
+    }
+  ],
+  "deadLetters": [
+    {
+      "dlqKey": "stream:dlq:product-updated",
+      "original": { "id": "1794990990211-12", "payload": { "id": "p1" }, "attempts": 5, "consumerGroup": "update-os", "consumerId": "update-opensearch-0" },
+      "data": { "id": "p1", "_dlqMetadata": { "originalId": "1794990990211-12", "attempts": 5, "consumerGroup": "update-os", "consumerId": "update-opensearch-0", "timestamp": "<ms since the epoch>" } }
+    },
+    {
+      "dlqKey": "stream:dlq:product-updated",
+      "original": { "id": "1794990990211-13", "fields": { "data": "{not json" }, "attempts": 0, "consumerGroup": "update-os", "consumerId": "update-opensearch-0" },
+      "data": { "_raw": { "data": "{not json" }, "_dlqMetadata": { "originalId": "1794990990211-13", "attempts": 0, "consumerGroup": "update-os", "consumerId": "update-opensearch-0", "timestamp": "<ms since the epoch>", "error": "<the parse error>" } }
+    }
+  ]
+}

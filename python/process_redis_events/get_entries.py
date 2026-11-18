@@ -1,36 +1,48 @@
-"""Get entries from Redis stream."""
+"""Get entries from a Redis stream: expired leases first (XAUTOCLAIM), then new entries (XREADGROUP)."""
+
+from __future__ import annotations
 
 import asyncio
-from typing import Any, TypeVar
+from typing import Any
 
-from pydantic import TypeAdapter
 from redis.asyncio import Redis
 
-from process_redis_events.chunk import chunk
 from process_redis_events.constants import RedisStreamCursors
-from process_redis_events.parse_json import parse_json
-from process_redis_events.result_of import result_of
-
-T = TypeVar("T")
-
-
-class PendingInfo:
-    """Information about a pending message."""
-
-    def __init__(self, id: str, consumer_id: str, idle_time: int, attempts: int):
-        self.id = id
-        self.consumer_id = consumer_id
-        self.idle_time = idle_time
-        self.attempts = attempts
+from process_redis_events.dlq import decode_fields
+from process_redis_events.entries import parse_fields
 
 
 class EntryData:
-    """Data for a stream entry."""
+    """A stream entry read by the consumer. ``attempts`` is the number of earlier deliveries (0 on the first)."""
 
-    def __init__(self, id: str, data: Any, attempts: int):
+    def __init__(
+        self,
+        id: str,
+        data: Any,
+        attempts: int,
+        fields: dict[str, str] | None = None,
+        parse_error: Exception | None = None,
+    ):
         self.id = id
         self.data = data
         self.attempts = attempts
+        self.fields = fields or {}
+        self.parse_error = parse_error
+
+
+def _s(v: Any) -> str:
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def _entry(id: str, fields: Any, attempts: int) -> EntryData:
+    data, error = parse_fields(fields)
+    return EntryData(
+        id=id,
+        data=data,
+        attempts=attempts,
+        fields=decode_fields(fields),
+        parse_error=error,
+    )
 
 
 async def get_entries(
@@ -42,145 +54,80 @@ async def get_entries(
     batch_size: int,
     reclaim_after: int,
     signal: asyncio.Event,
+    cursor: dict[str, str] | None = None,
 ) -> list[EntryData]:
-    """Get entries from a Redis stream with autoclaim.
+    """Reads the next batch for a consumer: entries idle for longer than ``reclaim_after`` (from any consumer of the
+    group) are claimed first; if there are none, new entries are read, blocking for up to ``block_for`` ms.
 
-    Args:
-        redis: Redis client
-        stream: Stream name
-        consumer_group: Consumer group name
-        consumer_id: Consumer ID
-        block_for: Time to block waiting for messages (ms)
-        batch_size: Maximum number of messages to retrieve
-        reclaim_after: Time before reclaiming messages (ms)
-        signal: Event to signal shutdown
-
-    Returns:
-        List of entry data
+    ``cursor`` ({"value": "0-0"}) keeps the XAUTOCLAIM scan position between calls: XAUTOCLAIM inspects at most
+    COUNT*10 PEL entries per call, so always starting at 0-0 could starve idle entries behind many in-flight ones.
     """
-    # Autoclaim pending messages
-    claimed_response = await redis.xautoclaim(
+    cursor = (
+        cursor if cursor is not None else {"value": RedisStreamCursors.OLDEST.value}
+    )
+    # Without JUSTID, XAUTOCLAIM returns the claimed entries themselves and increments their delivery count.
+    claimed: Any = await redis.xautoclaim(
         name=stream,
         groupname=consumer_group,
         consumername=consumer_id,
         min_idle_time=reclaim_after,
-        start_id=RedisStreamCursors.OLDEST.value,
+        start_id=cursor["value"],
         count=batch_size,
-        justid=True,
     )
+    cursor["value"] = (
+        _s(claimed[0]) if claimed and claimed[0] else RedisStreamCursors.OLDEST.value
+    )
+
+    entries = [
+        (_s(mid), fields) for mid, fields in (claimed[1] or []) if fields is not None
+    ]
+    # Redis >= 7 drops entries deleted from the stream from the PEL and lists their ids in element 3.
+    deleted = [_s(x) for x in (claimed[2] if len(claimed) > 2 else [])]
+    if deleted:
+        await redis.xack(stream, consumer_group, *deleted)  # type: ignore[no-untyped-call]
+
+    if entries:
+        # One round trip for every claimed id's delivery count.
+        pipe = redis.pipeline(transaction=False)
+        for mid, _ in entries:
+            pipe.xpending_range(
+                name=stream, groupname=consumer_group, min=mid, max=mid, count=1
+            )
+        results = await pipe.execute()
+        out: list[EntryData] = []
+        for (mid, fields), rows in zip(entries, results, strict=True):
+            # Acked or claimed by another consumer in the meantime.
+            if not rows or _s(rows[0]["consumer"]) != consumer_id:
+                continue
+            # XREADGROUP set the count to 1 and every claim adds 1.
+            out.append(_entry(mid, fields, max(int(rows[0]["times_delivered"]) - 1, 0)))
+        return out
 
     if signal.is_set():
         return []
 
-    # With justid=True, redis-py returns a flat list of IDs
-    # Without justid, it returns [next_cursor, [(id, data)], deleted_ids]
-    claimed_ids = claimed_response if isinstance(claimed_response, list) else []
-    claimed_count = len(claimed_ids)
-
-    # Get pending info for claimed messages
-    retry_data: dict[str, int] = {}
-    if claimed_ids:
-        # Decode message IDs from bytes to str
-        claimed_ids_str = [
-            id.decode() if isinstance(id, bytes) else id for id in claimed_ids
-        ]
-        pending_infos = await asyncio.gather(
-            *[
-                _get_pending_info(redis, stream, consumer_group, id)
-                for id in claimed_ids_str
-            ]
-        )
-        retry_data = {info.id: info.attempts for info in pending_infos if info}
-
-    if signal.is_set():
-        return []
-
-    # Read new messages
-    count = claimed_count if claimed_count > 0 else batch_size
-    cursor = (
-        RedisStreamCursors.OLDEST.value
-        if claimed_count > 0
-        else RedisStreamCursors.LATEST.value
-    )
-
-    error, entries = await result_of(
+    read = asyncio.ensure_future(
         redis.xreadgroup(
             groupname=consumer_group,
             consumername=consumer_id,
-            streams={stream: cursor},
-            count=count,
+            streams={stream: RedisStreamCursors.LATEST.value},
+            count=batch_size,
             block=block_for,
         )
     )
-
-    if signal.is_set():
-        return []
-
-    if error:
-        raise error
-
-    if not entries or len(entries) == 0:
-        return []
-
-    # Parse entries
-    queue_items: list[EntryData] = []
-    for stream_name, messages in entries:
-        for message_id, values in messages:
-            # Decode message_id from bytes to str
-            message_id_str = (
-                message_id.decode() if isinstance(message_id, bytes) else message_id
-            )
-
-            # values is a dict[bytes, bytes]
-            if not values or len(values) == 0:
-                data = None
-            elif b"data" in values:
-                data = parse_json(values[b"data"])
-            else:
-                # Convert to regular dict
-                data = {k.decode(): v.decode() for k, v in values.items()}
-
-            attempts = retry_data.get(message_id_str, 0)
-            queue_items.append(
-                EntryData(id=message_id_str, data=data, attempts=attempts)
-            )
-
-    return queue_items
-
-
-async def _get_pending_info(
-    redis: "Redis[Any]", stream: str, consumer_group: str, message_id: str
-) -> PendingInfo | None:
-    """Get pending information for a specific message."""
+    stopped = asyncio.ensure_future(signal.wait())
     try:
-        # Use XPENDING_RANGE to get details for a specific message ID
-        # XPENDING_RANGE stream group min_id max_id count
-        pending_response = await redis.xpending_range(
-            name=stream,
-            groupname=consumer_group,
-            min=message_id,
-            max=message_id,
-            count=1,
-        )
-        if pending_response and len(pending_response) > 0:
-            # Response format from redis-py is a list of dicts with keys:
-            # 'message_id', 'consumer', 'time_since_delivered', 'times_delivered'
-            info = pending_response[0]
-            result = PendingInfo(
-                id=(
-                    info["message_id"].decode()
-                    if isinstance(info["message_id"], bytes)
-                    else info["message_id"]
-                ),
-                consumer_id=(
-                    info["consumer"].decode()
-                    if isinstance(info["consumer"], bytes)
-                    else info["consumer"]
-                ),
-                idle_time=info["time_since_delivered"],
-                attempts=info["times_delivered"],  # This is the delivery count we want
-            )
-            return result
-    except Exception:
-        pass
-    return None
+        await asyncio.wait({read, stopped}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stopped.cancel()
+    if not read.done():
+        # Shutting down: interrupt the blocking read. Anything it may have read stays pending and is reclaimed after
+        # the lease (or at once by a consumer with the same name).
+        read.cancel()
+        try:
+            await read
+        except (asyncio.CancelledError, Exception):
+            pass
+        return []
+    res: Any = read.result()
+    return [_entry(_s(mid), fields, 0) for _, msgs in res or [] for mid, fields in msgs]

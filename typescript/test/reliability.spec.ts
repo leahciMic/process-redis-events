@@ -51,7 +51,16 @@ describe('reliability', () => {
     const a = (await admin.xadd(key, '*', 'data', '{"foo":"a"}'))!
     const b = (await admin.xadd(key, '*', 'data', '{"foo":"b"}'))!
     // A consumer that reads both entries and dies.
-    await admin.xreadgroup('GROUP', 'g', 'dead', 'COUNT', 2, 'STREAMS', key, '>')
+    await admin.xreadgroup(
+      'GROUP',
+      'g',
+      'dead',
+      'COUNT',
+      2,
+      'STREAMS',
+      key,
+      '>'
+    )
 
     const release = pDefer()
     const calls: QueueItem<Data>[] = []
@@ -223,7 +232,11 @@ describe('reliability', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const error = new Error('boom')
     stream.process(
-      { signal: controller.signal, consumerGroup: 'g', startFrom: StartFrom.Oldest },
+      {
+        signal: controller.signal,
+        consumerGroup: 'g',
+        startFrom: StartFrom.Oldest
+      },
       async () => {
         throw error
       }
@@ -274,7 +287,11 @@ describe('reliability', () => {
     const done = stream
       .process(
         // default leaseMs (30s): the read blocks for ~29s
-        { signal: controller.signal, consumerGroup: 'g', startFrom: StartFrom.Oldest },
+        {
+          signal: controller.signal,
+          consumerGroup: 'g',
+          startFrom: StartFrom.Oldest
+        },
         async () => {
           started.resolve()
           await release.promise
@@ -330,7 +347,11 @@ describe('reliability', () => {
     let rejected: unknown = null
     const done = stream
       .process(
-        { signal: controller.signal, consumerGroup: 'g', startFrom: StartFrom.Oldest },
+        {
+          signal: controller.signal,
+          consumerGroup: 'g',
+          startFrom: StartFrom.Oldest
+        },
         callback
       )
       .catch((e) => {
@@ -344,5 +365,62 @@ describe('reliability', () => {
     expect(errorSpy).toHaveBeenCalled()
     controller.abort()
     await done
+  })
+})
+
+describe('heartbeat and format', () => {
+  it('a heartbeat never takes a message back from its new owner', async () => {
+    const redis = createRedis()
+    const key = `stream:test-pre-hb-${Date.now()}`
+    try {
+      await redis.xgroup('CREATE', key, 'g', '0', 'MKSTREAM')
+      const id = (await redis.xadd(key, '*', 'data', '{}'))!
+      await redis.xreadgroup('GROUP', 'g', 'slow', 'STREAMS', key, '>')
+      await redis.xclaim(key, 'g', 'thief', 0, id)
+      const hb = new HeartbeatManager(redis, key, 'g', 'slow', 60_000)
+      hb.add(id)
+      expect(await hb.sendHeartbeats()).toEqual([id])
+      hb.close()
+      const rows = (await redis.xpending(key, 'g', '-', '+', 10)) as [
+        string,
+        string
+      ][]
+      expect(rows[0]?.[1]).toBe('thief')
+    } finally {
+      await redis.del(key)
+      await redis.quit()
+    }
+  })
+
+  it('add() writes the shared fixture bytes', async () => {
+    const { readFileSync } = await import('node:fs')
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL('../../fixtures/stream-format.json', import.meta.url),
+        'utf8'
+      )
+    ) as {
+      messages: {
+        stream: string
+        key: string
+        payload: Record<string, unknown>
+        fields: Record<string, string>
+      }[]
+    }
+    const redis = createRedis()
+    for (const m of fixture.messages) {
+      const name = `test-pre-fmt-${Date.now()}-${m.stream}`
+      const stream = new Stream({ name, createRedis })
+      try {
+        await stream.add(m.payload)
+        const entries = await redis.xrange(`stream:${name}`, '-', '+')
+        const fields = entries[0]?.[1] ?? []
+        expect(Object.fromEntries([[fields[0], fields[1]]])).toEqual(m.fields)
+        expect(m.key).toBe(`stream:${m.stream}`)
+      } finally {
+        await redis.del(`stream:${name}`)
+      }
+    }
+    await redis.quit()
   })
 })

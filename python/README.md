@@ -12,6 +12,45 @@ A Python library for processing Redis Stream events with consumer groups, provid
 - **Event Streaming**: Optional event stream for progress tracking
 - **Async/Await**: Built on asyncio for high performance
 
+## Synchronous batch consumer (`BatchConsumer`, `StreamConsumer`)
+
+For services whose work is blocking (Postgres, Milvus, model inference, paid API calls) there's a threaded
+consumer with the semantics of the TypeScript consumers (`process_redis_events.consumer`; see its docstring):
+
+```python
+import threading
+import redis
+from process_redis_events import BatchConsumer, Paused, TransientError, install_signal_handlers
+
+stop = threading.Event()
+install_signal_handlers(stop)  # SIGTERM/SIGINT: finish the current batch, then return
+
+def handle(payloads: list[dict]) -> None | list[Exception | None]:
+    ...  # raise to fail the batch, or return an error (or None) per payload
+
+BatchConsumer(
+    redis.Redis(host="redis", socket_timeout=30),
+    "product-enrich",           # stream:product-enrich
+    "product-enrich",           # consumer group
+    "product-enrich",           # service: in logs and the default consumer name
+    handle,
+    batch_size=500, max_wait_s=30, lease_ms=10 * 60_000, max_attempts=3, stop=stop,
+).run()
+```
+
+- **Consumer name**: `STREAM_CONSUMER_NAME`, else `<HOSTNAME>-<service>`. On start it takes over its own pending
+  messages at once (a redelivery each), so give a single-replica Deployment (strategy Recreate) a fixed name.
+- **Transient errors** (`transient_kind`: Redis, Postgres SQLSTATEs, Milvus/gRPC, HTTP 5xx/429, socket errors,
+  `TransientError`) are retried in place for up to `transient_max_s` (15 min) without using up a delivery; then
+  the batch fails whole. `Paused(wait_s=...)` keeps the batch and waits.
+- **Permanent errors** bisect the batch down to the bad message; after `max_attempts` deliveries it goes to
+  `stream:dlq:<name>` with `_dlqMetadata` (acked only once that's written).
+- **Leases** are heartbeated every lease/3, only for messages this consumer still owns.
+- The blocking read stays below the client's `socket_timeout` (redis-py 8 defaults it to 5 s).
+- `StreamConsumer` is the same, one message at a time (`handler(payload)`).
+
+The wire format both libraries write and read is pinned by `../fixtures/stream-format.json`.
+
 ## Installation
 
 ```bash

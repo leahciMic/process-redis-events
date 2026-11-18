@@ -378,7 +378,16 @@ export class Stream<T extends Record<string, unknown>> {
     const redis = this.redis
     const queue = new pQueue({ concurrency })
     const heartbeat = Math.round(leaseMs / 2)
-    const xclaimBlockTimeout = Math.max(leaseMs - 1_000, 100)
+    // Shorter than the lease, and than ioredis' commandTimeout if one is set:
+    // a blocking read that outlives it fails with "Command timed out".
+    const commandTimeout = streamRedis.options.commandTimeout
+    const xclaimBlockTimeout = Math.max(
+      Math.min(
+        leaseMs - 1_000,
+        commandTimeout ? commandTimeout - 1_000 : Infinity
+      ),
+      commandTimeout ? Math.min(100, commandTimeout / 2) : 100
+    )
     const reclaimAfter = leaseMs + 100
     const cursor = { value: '0-0' }
 
@@ -525,7 +534,12 @@ export class Stream<T extends Record<string, unknown>> {
     try {
       while (!signal.aborted) {
         try {
-          await createGroup(streamRedis, this.streamKey, consumerGroup, startFrom)
+          await createGroup(
+            streamRedis,
+            this.streamKey,
+            consumerGroup,
+            startFrom
+          )
           break
         } catch (error) {
           if (signal.aborted) break
